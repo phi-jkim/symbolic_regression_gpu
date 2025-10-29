@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <vector>
 #include <cstdlib>
+#include <chrono>
 
 extern "C" float eval_tree_cpu(const int* tokens,
                                 const float* values,
@@ -19,10 +20,39 @@ static void run_example(const char* name,
                         const std::vector<int>& tokens,
                         const std::vector<float>& values,
                         const std::vector<float>& x) {
+    const int iters_cpu = 1000;
+    const int iters_gpu = 100;
+
+    // Single evaluations (also verify values)
     float cpu = eval_tree_cpu(tokens.data(), values.data(), x.data(), (int)tokens.size(), (int)x.size());
     float gpu = 0.0f;
     eval_tree_gpu(tokens.data(), values.data(), x.data(), (int)tokens.size(), (int)x.size(), &gpu);
     std::printf("%s -> cpu=%.7f gpu=%.7f\n", name, cpu, gpu);
+
+    // CPU timing (average per call)
+    auto t0 = std::chrono::high_resolution_clock::now();
+    float acc_cpu = 0.0f;
+    for (int i = 0; i < iters_cpu; ++i) {
+        acc_cpu += eval_tree_cpu(tokens.data(), values.data(), x.data(), (int)tokens.size(), (int)x.size());
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double us_cpu = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    double avg_us_cpu = us_cpu / iters_cpu;
+
+    // GPU timing (average per call; includes allocations inside eval_tree_gpu)
+    auto g0 = std::chrono::high_resolution_clock::now();
+    float acc_gpu = 0.0f, tmp = 0.0f;
+    for (int i = 0; i < iters_gpu; ++i) {
+        tmp = 0.0f;
+        eval_tree_gpu(tokens.data(), values.data(), x.data(), (int)tokens.size(), (int)x.size(), &tmp);
+        acc_gpu += tmp;
+    }
+    auto g1 = std::chrono::high_resolution_clock::now();
+    double us_gpu = std::chrono::duration_cast<std::chrono::microseconds>(g1 - g0).count();
+    double avg_us_gpu = us_gpu / iters_gpu;
+
+    std::printf("%s timings: cpu_avg_us=%.3f (iters=%d) gpu_avg_us=%.3f (iters=%d)\n",
+                name, avg_us_cpu, iters_cpu, avg_us_gpu, iters_gpu);
 }
 
 int main(int argc, char** argv) {

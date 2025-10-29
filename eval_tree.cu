@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <vector>
 #include <algorithm>
+#include <stdio.h>
 
 // Token encoding
 // TOK_CONST = 0 -> values[i] holds the constant value
@@ -157,7 +158,6 @@ __global__ void eval_prefix_kernel(const int* __restrict__ tokens,
     // tokens : [ADD(1), MUL(3), VAR(-1), VAR(-1), VAR(-1)] 
     // values: [0, 0, 0, 1, 2]
     // x    : [1.5, 2.0, 0.25]
-    
 
     for (int i = len - 1; i >= 0; --i) {
         const int t = tokens[i];
@@ -233,6 +233,12 @@ extern "C" void eval_tree_gpu(const int* tokens,
                                int len,
                                int num_features,
                                float* out_host) {
+    int deviceCount = 0;
+    cudaError_t err = cudaGetDeviceCount(&deviceCount);
+    if (err != cudaSuccess || deviceCount == 0) {
+        *out_host = NAN;
+        return;
+    }
     int *d_tokens = nullptr;
     float *d_values = nullptr, *d_x = nullptr, *d_out = nullptr;
 
@@ -249,8 +255,23 @@ extern "C" void eval_tree_gpu(const int* tokens,
                 + sizeof(int)   * (size_t)len /* s_tag */
                 + sizeof(float) * (size_t)len /* s_pa */
                 + sizeof(float) * (size_t)len /* s_pb */;
+    {
+        float init = -123.456f;
+        cudaMemcpy(d_out, &init, sizeof(float), cudaMemcpyHostToDevice);
+    }
     eval_prefix_kernel<<<1, 1, smem>>>(d_tokens, d_values, d_x, len, num_features, d_out);
-    cudaDeviceSynchronize();
+    cudaError_t launchErr = cudaGetLastError();
+    if (launchErr != cudaSuccess) {
+        *out_host = NAN;
+        cudaFree(d_tokens); cudaFree(d_values); cudaFree(d_x); cudaFree(d_out);
+        return;
+    }
+    cudaError_t syncErr = cudaDeviceSynchronize();
+    if (syncErr != cudaSuccess) {
+        *out_host = NAN;
+        cudaFree(d_tokens); cudaFree(d_values); cudaFree(d_x); cudaFree(d_out);
+        return;
+    }
 
     float out_val = 0.0f;
     cudaMemcpy(&out_val, d_out, sizeof(float), cudaMemcpyDeviceToHost);

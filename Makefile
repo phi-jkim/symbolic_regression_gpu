@@ -1,5 +1,8 @@
 NVCC ?= nvcc
-NVFLAGS ?= -O3
+# Target NVIDIA L40S (Ada, SM 89). Embed PTX for forward-compat JIT.
+NVFLAGS ?= -O3 \
+  -gencode arch=compute_89,code=sm_89 \
+  -gencode arch=compute_89,code=compute_89
 TARGET := libevaltree.so
 SRC := eval_tree.cu
 
