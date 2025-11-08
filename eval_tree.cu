@@ -1,18 +1,76 @@
+// eval_tree.cu
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
 #include <vector>
 #include <algorithm>
 #include <stdio.h>
+#include <cmath>
 
-// Token encoding
-// TOK_CONST = 0 -> values[i] holds the constant value
-// TOK_VAR   = -1 -> values[i] holds the variable index (0..num_features-1)
-// Operators (positive):
-// 1=ADD, 2=SUB, 3=MUL, 4=DIV, 5=SIN, 6=COS, 7=EXP, 8=LOG
+// ---- Low-level async copy helpers (Ampere+) ----
+
+__device__ __forceinline__ void cp_async4(void *smem_ptr, const void *glob_ptr) {
+    const int BYTES = 16;
+    uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    asm volatile(
+        "{\n"
+        "   cp.async.cg.shared.global [%0], [%1], %2;\n"
+        "}\n" : : "r"(smem),
+        "l"(glob_ptr),
+        "n"(BYTES));
+}
+
+__device__ __forceinline__ void async_commit_group() {
+    asm volatile("cp.async.commit_group;\n" ::);
+}
+
+template <int N> __device__ __forceinline__ void async_wait_pending() {
+    asm volatile("cp.async.wait_group %0;\n" : : "n"(N));
+}
+
+template<int BYTES>
+__device__ __forceinline__ void cp_async(void* smem_ptr, const void* glob_ptr) {
+  static_assert(BYTES==4 || BYTES==8 || BYTES==16, "cp.async doesn't support more than 16 byte");
+  uint32_t smem = (uint32_t)__cvta_generic_to_shared(smem_ptr);
+  asm volatile("{\n\tcp.async.ca.shared.global [%0], [%1], %2;\n}"
+               :: "r"(smem), "l"(glob_ptr), "n"(BYTES));
+}
+
+// ---- Token / operator encoding ----
 
 static const int TOK_CONST = 0;
 static const int TOK_VAR   = -1;
+
+// Operator codes (positive)
+static const int OP_ADD = 1;
+static const int OP_SUB = 2;
+static const int OP_MUL = 3;
+static const int OP_DIV = 4;
+static const int OP_SIN = 5;
+static const int OP_COS = 6;
+static const int OP_EXP = 7;
+static const int OP_LOG = 8;
+static const int OP_LOOSE_DIV = 9;
+static const int OP_POW = 10;
+static const int OP_LOOSE_POW = 11;
+static const int OP_MAX = 12;
+static const int OP_MIN = 13;
+static const int OP_LT  = 14;
+static const int OP_GT  = 15;
+static const int OP_LE  = 16;
+static const int OP_GE  = 17;
+static const int OP_TAN = 18;
+static const int OP_SINH= 19;
+static const int OP_COSH= 20;
+static const int OP_TANH= 21;
+static const int OP_LOOSE_LOG = 22;
+static const int OP_INV = 23;
+static const int OP_LOOSE_INV = 24;
+static const int OP_NEG = 25;
+static const int OP_ABS = 26;
+static const int OP_SQRT= 27;
+static const int OP_LOOSE_SQRT = 28;
+static const int OP_IF  = 29; // ternary
 
 __host__ __device__ inline float madd(float a, float b, float c) {
 #ifdef __CUDA_ARCH__
@@ -22,14 +80,115 @@ __host__ __device__ inline float madd(float a, float b, float c) {
 #endif
 }
 
-__host__ __device__ inline int op_arity(int op) {
-    if (op == 5 || op == 6 || op == 7 || op == 8) return 1; // unary
-    return 2; // binary for 1..4
+__host__ __device__ inline int op_arity(int op);
+__host__ __device__ inline float apply_op(int op, float a, float b);
+__host__ __device__ inline float safe_div(float a, float b);
+
+#ifndef MAX_EVAL_STACK
+#define MAX_EVAL_STACK 128
+#endif
+
+// ---- Batched (datapoint-parallel) evaluator ----
+
+__global__ void eval_prefix_kernel_batch(const int* __restrict__ tokens,
+                                         const float* __restrict__ values,
+                                         const float* __restrict__ X, // [dataPoints, num_features]
+                                         int len,
+                                         int num_features,
+                                         int dataPoints,
+                                         float* __restrict__ out) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= dataPoints) return;
+    if (len > MAX_EVAL_STACK) {
+        if (idx == 0) out[0] = NAN;
+        return;
+    }
+
+    float s_val[MAX_EVAL_STACK];
+    int   s_tag[MAX_EVAL_STACK];
+    float s_pa[MAX_EVAL_STACK];
+    float s_pb[MAX_EVAL_STACK];
+    int sp = 0;
+
+    const float* x = X + (size_t)idx * (size_t)num_features;
+
+    // Evaluate one prefix expression for datapoint idx
+    for (int i = len - 1; i >= 0; --i) {
+        const int t = tokens[i];
+        if (t == TOK_CONST) {
+            s_val[sp] = values[i]; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+        } else if (t == TOK_VAR) {
+            int fidx = (int)values[i];
+            float v = (fidx >= 0 && fidx < num_features) ? x[fidx] : 0.0f;
+            s_val[sp] = v; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+        } else {
+            const int ar = op_arity(t);
+            if (ar == 1) {
+                float a = s_val[--sp];
+                float r = apply_op(t, a, 0.0f);
+                s_val[sp] = r; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+            } else if (ar == 2) {
+                float a_v = s_val[--sp]; int a_t = s_tag[sp]; float a_pa = s_pa[sp]; float a_pb = s_pb[sp];
+                float b_v = s_val[--sp]; int b_t = s_tag[sp]; float b_pa = s_pa[sp]; float b_pb = s_pb[sp];
+                (void)a_t; (void)b_t; (void)a_pa; (void)a_pb; (void)b_pa; (void)b_pb;
+                float r;
+                if (t == OP_ADD)      r = a_v + b_v;
+                else if (t == OP_SUB) r = a_v - b_v;
+                else if (t == OP_MUL) r = a_v * b_v;
+                else if (t == OP_DIV) r = a_v / b_v;
+                else                  r = apply_op(t, a_v, b_v);
+                s_val[sp] = r; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+            } else { // ternary IF
+                float c = s_val[--sp];
+                float b = s_val[--sp];
+                float a = s_val[--sp];
+                float r = (a > 0.0f) ? b : c;
+                s_val[sp] = r; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+            }
+        }
+    }
+    out[idx] = (sp > 0) ? s_val[sp - 1] : 0.0f;
 }
+
+extern "C" void eval_tree_gpu_batch(const int* tokens,
+                                    const float* values,
+                                    const float* X,
+                                    int len,
+                                    int num_features,
+                                    int dataPoints,
+                                    float* out_dev,
+                                    int blocks,
+                                    int threads) {
+    if (threads <= 0) threads = 256;
+    if (blocks  <= 0) blocks  = (dataPoints + threads - 1) / threads;
+    eval_prefix_kernel_batch<<<blocks, threads>>>(tokens, values, X, len, num_features, dataPoints, out_dev);
+}
+
+// ---- Single-expression evaluators (GPU + CPU) ----
+
+__host__ __device__ inline int op_arity(int op) {
+    if (op == OP_IF) return 3;
+    if (op == OP_SIN || op == OP_COS || op == OP_EXP || op == OP_LOG ||
+        op == OP_TAN || op == OP_SINH || op == OP_COSH || op == OP_TANH ||
+        op == OP_LOOSE_LOG || op == OP_INV || op == OP_LOOSE_INV ||
+        op == OP_NEG || op == OP_ABS || op == OP_SQRT || op == OP_LOOSE_SQRT)
+        return 1;
+    return 2;
+}
+
+static const float DELTA = 1e-9f;
+static const float MAX_VAL = 1e9f;
+
+__host__ __device__ inline float clamp_val(float r) { return r; }
 
 __host__ __device__ inline float safe_div(float a, float b) {
     const float eps = 1e-12f;
     float denom = fabsf(b) < eps ? (b < 0 ? -eps : eps) : b;
+    return a / denom;
+}
+
+__host__ __device__ inline float loose_div(float a, float b) {
+    float denom = fabsf(b) <= DELTA ? (b < 0 ? -DELTA : DELTA) : b;
     return a / denom;
 }
 
@@ -38,23 +197,60 @@ __host__ __device__ inline float safe_log(float a) {
     return logf(fabsf(a) + eps);
 }
 
+__host__ __device__ inline float loose_log(float a) {
+    if (a == 0.0f) return -MAX_VAL;
+    return logf(fabsf(a));
+}
+
+__host__ __device__ inline float safe_inv(float a) {
+    if (a == 0.0f) return NAN;
+    return 1.0f / a;
+}
+
+__host__ __device__ inline float loose_inv(float a) {
+    float denom = fabsf(a) <= DELTA ? (a < 0 ? -DELTA : DELTA) : a;
+    return 1.0f / denom;
+}
+
 __host__ __device__ inline float apply_op(int op, float a, float b) {
     switch (op) {
-        case 1: return a + b; // ADD
-        case 2: return a - b; // SUB
-        case 3: return a * b; // MUL
-        case 4: return safe_div(a, b); // DIV
-        case 5: return sinf(a); // SIN (b ignored)
-        case 6: return cosf(a); // COS (b ignored)
-        case 7: return expf(a); // EXP (b ignored)
-        case 8: return safe_log(a); // LOG (b ignored)
+        // binary
+        case OP_ADD: return clamp_val(a + b);
+        case OP_SUB: return clamp_val(a - b);
+        case OP_MUL: return clamp_val(a * b);
+        case OP_DIV: return (b == 0.0f) ? NAN : clamp_val(a / b);
+        case OP_LOOSE_DIV: return clamp_val(loose_div(a, b));
+        case OP_POW: return clamp_val(powf(a, b));
+        case OP_LOOSE_POW: return (a == 0.0f && b == 0.0f) ? 0.0f : clamp_val(powf(fabsf(a), b));
+        case OP_MAX: return clamp_val(a >= b ? a : b);
+        case OP_MIN: return clamp_val(a <= b ? a : b);
+        case OP_LT:  return clamp_val(a <  b ? 1.0f : -1.0f);
+        case OP_GT:  return clamp_val(a >  b ? 1.0f : -1.0f);
+        case OP_LE:  return clamp_val(a <= b ? 1.0f : -1.0f);
+        case OP_GE:  return clamp_val(a >= b ? 1.0f : -1.0f);
+        // unary
+        case OP_SIN: return clamp_val(sinf(a));
+        case OP_COS: return clamp_val(cosf(a));
+        case OP_TAN: return clamp_val(tanf(a));
+        case OP_SINH: return clamp_val(sinhf(a));
+        case OP_COSH: return clamp_val(coshf(a));
+        case OP_TANH: return clamp_val(tanhf(a));
+        case OP_LOG: return clamp_val(logf(a));
+        case OP_LOOSE_LOG: return clamp_val(loose_log(a));
+        case OP_EXP: return clamp_val(expf(a));
+        case OP_INV: return clamp_val(safe_inv(a));
+        case OP_LOOSE_INV: return clamp_val(loose_inv(a));
+        case OP_NEG: return clamp_val(-a);
+        case OP_ABS: return clamp_val(fabsf(a));
+        case OP_SQRT: return clamp_val(sqrtf(a));
+        case OP_LOOSE_SQRT: return clamp_val(sqrtf(fabsf(a)));
         default: return 0.0f;
     }
 }
 
 struct TagVal {
     float v;
-    int tag;    // 0 = plain value, 1 = v == pa * pb
+    int tag;    // 0 = plain value (placeholder for future algebraic tags)
     float pa;
     float pb;
 };
@@ -81,50 +277,24 @@ static inline float eval_prefix_cpu_impl(const int* tokens,
             if (ar == 1) {
                 TagVal a = stack.back(); stack.pop_back();
                 float r = apply_op(t, a.v, 0.0f);
-                stack.push_back({r, 0, 0.0f, 0.0f});
-            } else {
+                stack.push_back({r, 0, 0.0f, 0.0f});   // push unary result
+            } else if (ar == 2) {
                 TagVal a = stack.back(); stack.pop_back();
                 TagVal b = stack.back(); stack.pop_back();
-                float r;
-                int out_tag = 0;
-                float pa = 0.0f, pb = 0.0f;
-                if (t == 1) {
-                    // recognizes patterns like (a*b) + c and use fused multiply add 
-                    if (a.tag == 1) r = madd(a.pa, a.pb, b.v);
-                    else if (b.tag == 1) r = madd(b.pa, b.pb, a.v);
-                    else r = a.v + b.v;
-                } else if (t == 2) {
-                    if (a.tag == 1) r = madd(a.pa, a.pb, -b.v);
-                    else if (b.tag == 1) r = madd(-b.pa, b.pb, a.v);
-                    else r = a.v - b.v;
-                } else if (t == 3) {
-                    if (a.tag == 1 && b.tag == 1) {
-                        pa = a.pa * a.pb;
-                        pb = b.pa * b.pb;
-                        out_tag = 1;
-                        r = (pa * pb);
-                    } else if (a.tag == 1) {
-                        pa = a.pa;
-                        pb = a.pb * b.v;
-                        out_tag = 1;
-                        r = (pa * pb);
-                    } else if (b.tag == 1) {
-                        pa = a.v * b.pa;
-                        pb = b.pb;
-                        out_tag = 1;
-                        r = (pa * pb);
-                    } else {
-                        pa = a.v;
-                        pb = b.v;
-                        out_tag = 1;
-                        r = (pa * pb);
-                    }
-                } else if (t == 4) {
-                    r = safe_div(a.v, b.v);
-                } else {
-                    r = apply_op(t, a.v, b.v);
-                }
-                stack.push_back({r, out_tag, pa, pb});
+                float r = 0.0f;
+                if (t == OP_ADD)      r = clamp_val(a.v + b.v);
+                else if (t == OP_SUB) r = clamp_val(a.v - b.v);
+                else if (t == OP_MUL) r = clamp_val(a.v * b.v);
+                else if (t == OP_DIV) r = (b.v == 0.0f) ? NAN : a.v / b.v;
+                else                  r = clamp_val(apply_op(t, a.v, b.v));
+                stack.push_back({r, 0, 0.0f, 0.0f});
+            } else {
+                // ternary (IF)
+                TagVal a = stack.back(); stack.pop_back(); // cond
+                TagVal b = stack.back(); stack.pop_back(); // then
+                TagVal c = stack.back(); stack.pop_back(); // else
+                float r = (a.v > 0.0f) ? b.v : c.v;
+                stack.push_back({r, 0, 0.0f, 0.0f});
             }
         }
     }
@@ -132,12 +302,14 @@ static inline float eval_prefix_cpu_impl(const int* tokens,
 }
 
 extern "C" float eval_tree_cpu(const int* tokens,
-                                const float* values,
-                                const float* features,
-                                int len,
-                                int num_features) {
+                               const float* values,
+                               const float* features,
+                               int len,
+                               int num_features) {
     return eval_prefix_cpu_impl(tokens, values, features, len, num_features);
 }
+
+// ---- Single-expression GPU launcher (shared-memory stack) ----
 
 __global__ void eval_prefix_kernel(const int* __restrict__ tokens,
                                    const float* __restrict__ values,
@@ -154,73 +326,37 @@ __global__ void eval_prefix_kernel(const int* __restrict__ tokens,
     float* s_pb  = reinterpret_cast<float*>(s_pa + len);
     int sp = 0;
 
-    // examples
-    // tokens : [ADD(1), MUL(3), VAR(-1), VAR(-1), VAR(-1)] 
-    // values: [0, 0, 0, 1, 2]
-    // x    : [1.5, 2.0, 0.25]
-
     for (int i = len - 1; i >= 0; --i) {
         const int t = tokens[i];
         if (t == TOK_CONST) {
-            s_val[sp] = values[i];
-            s_tag[sp] = 0;
-            s_pa[sp] = 0.0f; s_pb[sp] = 0.0f;
-            ++sp;
+            s_val[sp] = values[i]; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
         } else if (t == TOK_VAR) {
             int idx = (int)values[i];
             float v = 0.0f;
             if (idx >= 0 && idx < num_features) v = x[idx];
-            s_val[sp] = v;
-            s_tag[sp] = 0;
-            s_pa[sp] = 0.0f; s_pb[sp] = 0.0f;
-            ++sp;
+            s_val[sp] = v; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
         } else {
             const int ar = op_arity(t);
             if (ar == 1) {
                 float a = s_val[--sp];
                 float r = apply_op(t, a, 0.0f);
-                s_val[sp] = r;
-                s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f;
-                ++sp;
-            } else {
+                s_val[sp] = r; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+            } else if (ar == 2) {
                 float a_v = s_val[--sp];
-                int   a_t = s_tag[sp];
-                float a_pa = s_pa[sp];
-                float a_pb = s_pb[sp];
                 float b_v = s_val[--sp];
-                int   b_t = s_tag[sp];
-                float b_pa = s_pa[sp];
-                float b_pb = s_pb[sp];
-
-                float r; int out_t = 0; float pa = 0.0f, pb = 0.0f;
-                if (t == 1) {
-                    if (a_t == 1) r = madd(a_pa, a_pb, b_v);
-                    else if (b_t == 1) r = madd(b_pa, b_pb, a_v);
-                    else r = a_v + b_v;
-                } else if (t == 2) {
-                    if (a_t == 1) r = madd(a_pa, a_pb, -b_v);
-                    else if (b_t == 1) r = madd(-b_pa, b_pb, a_v);
-                    else r = a_v - b_v;
-                } else if (t == 3) {
-                    if (a_t == 1 && b_t == 1) {
-                        pa = a_pa * a_pb; pb = b_pa * b_pb; out_t = 1; r = (pa * pb);
-                    } else if (a_t == 1) {
-                        pa = a_pa; pb = a_pb * b_v; out_t = 1; r = (pa * pb);
-                    } else if (b_t == 1) {
-                        pa = a_v * b_pa; pb = b_pb; out_t = 1; r = (pa * pb);
-                    } else {
-                        pa = a_v; pb = b_v; out_t = 1; r = (pa * pb);
-                    }
-                } else if (t == 4) {
-                    r = safe_div(a_v, b_v);
-                } else {
-                    r = apply_op(t, a_v, b_v);
-                }
-                s_val[sp] = r;
-                s_tag[sp] = out_t;
-                s_pa[sp]  = pa;
-                s_pb[sp]  = pb;
-                ++sp;
+                float r;
+                if (t == OP_ADD)      r = clamp_val(a_v + b_v);
+                else if (t == OP_SUB) r = clamp_val(a_v - b_v);
+                else if (t == OP_MUL) r = clamp_val(a_v * b_v);
+                else if (t == OP_DIV) r = (b_v == 0.0f) ? NAN : a_v / b_v;
+                else                   r = apply_op(t, a_v, b_v);
+                s_val[sp] = r; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+            } else {
+                float cond = s_val[--sp];
+                float then_v = s_val[--sp];
+                float else_v = s_val[--sp];
+                float r = (cond > 0.0f) ? then_v : else_v;
+                s_val[sp] = r; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
             }
         }
     }
@@ -281,4 +417,149 @@ extern "C" void eval_tree_gpu(const int* tokens,
     cudaFree(d_values);
     cudaFree(d_x);
     cudaFree(d_out);
+}
+
+// ---- Population x datapoints async double-buffer evaluator ----
+
+__global__ void eval_pop_dp_async_kernel(const int* __restrict__ tokens_all,
+                                         const float* __restrict__ values_all,
+                                         const int* __restrict__ offsets,
+                                         const int* __restrict__ lengths,
+                                         const float* __restrict__ X,
+                                         int num_features,
+                                         int dataPoints,
+                                         int popSize,
+                                         float* __restrict__ out) {
+    const int tree = blockIdx.x;
+    if (tree >= popSize) return;
+    const int len = lengths[tree];
+    if (len <= 0 || len > MAX_EVAL_STACK) return;
+    const int base = offsets[tree];
+    const int* __restrict__ tokens = tokens_all + base;
+    const float* __restrict__ values = values_all + base;
+
+    extern __shared__ float shmem[];
+    float* buf0 = shmem;
+    float* buf1 = shmem + (size_t)blockDim.x * (size_t)num_features;
+
+    const int tile = blockDim.x;
+    const int tiles_per_grid_y = gridDim.y > 0 ? gridDim.y : 1;
+    int t0 = blockIdx.y * tile;
+    const int stride = tile * tiles_per_grid_y;
+
+    const int tid = threadIdx.x;
+
+    auto copy_tile = [&](int start, float* dst) {
+      const int dp = start + tid;
+      if (dp < dataPoints) {
+          const float* src = X + (size_t)dp * (size_t)num_features;
+          int f = 0;
+          for (; f + 3 < num_features; f += 4) {
+              void* sptr = (void*)(&dst[(size_t)tid * (size_t)num_features + f]);
+              const void* gptr = (const void*)(&src[f]);
+              // Fast path: single 16B cp.async if both pointers are 16B-aligned.
+              if ((((uintptr_t)sptr | (uintptr_t)gptr) & 0xF) == 0) {
+                  cp_async4(sptr, gptr);
+              } else {
+                  cp_async<4>((void*)((float*)sptr + 0), (const void*)((const float*)gptr + 0));
+                  cp_async<4>((void*)((float*)sptr + 1), (const void*)((const float*)gptr + 1));
+                  cp_async<4>((void*)((float*)sptr + 2), (const void*)((const float*)gptr + 2));
+                  cp_async<4>((void*)((float*)sptr + 3), (const void*)((const float*)gptr + 3));
+              }
+          }
+          for (; f < num_features; ++f) {
+              cp_async<4>(&dst[(size_t)tid * (size_t)num_features + f], &src[f]);
+          }
+      } else {
+          for (int f = 0; f < num_features; ++f) {
+              if (tid < tile) dst[(size_t)tid * (size_t)num_features + f] = 0.0f;
+          }
+      }
+    };
+
+    if (t0 >= dataPoints) return;
+
+    copy_tile(t0, buf0);
+    async_commit_group();
+    async_wait_pending<0>();   // wait for committed groups before consumption
+    __syncthreads();
+
+    int t = t0;
+    float* cur = buf0;
+    float* nxt = buf1;
+
+    while (t < dataPoints) {
+        const int next_t = t + stride;
+        if (next_t < dataPoints) {
+            copy_tile(next_t, nxt);
+            async_commit_group();
+        }
+
+        const int dp = t + tid;
+        if (dp < dataPoints) {
+            float s_val[MAX_EVAL_STACK];
+            int   s_tag[MAX_EVAL_STACK];
+            float s_pa[MAX_EVAL_STACK];
+            float s_pb[MAX_EVAL_STACK];
+            int sp = 0;
+
+            for (int i = len - 1; i >= 0; --i) {
+                const int tt = tokens[i];
+                if (tt == TOK_CONST) {
+                    s_val[sp] = values[i]; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+                } else if (tt == TOK_VAR) {
+                    int fidx = (int)values[i];
+                    float v = (fidx >= 0 && fidx < num_features) ? cur[(size_t)tid * (size_t)num_features + fidx] : 0.0f;
+                    s_val[sp] = v; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+                } else {
+                    const int ar = op_arity(tt);
+                    if (ar == 1) {
+                        float a = s_val[--sp];
+                        float r = apply_op(tt, a, 0.0f);
+                        s_val[sp] = r; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+                    } else if (ar == 2) {
+                        float a_v = s_val[--sp];
+                        float b_v = s_val[--sp];
+                        float r;
+                        if (tt == OP_ADD)      r = clamp_val(a_v + b_v);
+                        else if (tt == OP_SUB) r = clamp_val(a_v - b_v);
+                        else if (tt == OP_MUL) r = clamp_val(a_v * b_v);
+                        else if (tt == OP_DIV) r = (b_v == 0.0f) ? NAN : a_v / b_v;
+                        else                    r = apply_op(tt, a_v, b_v);
+                        s_val[sp] = r; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+                    } else {
+                        float c = s_val[--sp];
+                        float b = s_val[--sp];
+                        float a = s_val[--sp];
+                        float r = (a > 0.0f) ? b : c;
+                        s_val[sp] = r; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+                    }
+                }
+            }
+            out[(size_t)tree * (size_t)dataPoints + dp] = (sp > 0) ? s_val[sp - 1] : 0.0f;
+        }
+
+        async_wait_pending<0>();
+        __syncthreads();
+        float* tmp = cur; cur = nxt; nxt = tmp;
+        t = next_t;
+    }
+}
+
+extern "C" void eval_tree_gpu_pop_dp_async(const int* tokens_all,
+                                           const float* values_all,
+                                           const int* offsets,
+                                           const int* lengths,
+                                           int popSize,
+                                           const float* X,
+                                           int num_features,
+                                           int dataPoints,
+                                           float* out_dev,
+                                           int blocks_y,
+                                           int threads) {
+    if (threads <= 0) threads = 256;
+    if (blocks_y <= 0) blocks_y = (dataPoints + threads - 1) / threads;
+    dim3 grid(popSize, blocks_y, 1);
+    size_t smem = sizeof(float) * (size_t)threads * (size_t)num_features * 2u;
+    eval_pop_dp_async_kernel<<<grid, threads, smem>>>(tokens_all, values_all, offsets, lengths, X, num_features, dataPoints, popSize, out_dev);
 }

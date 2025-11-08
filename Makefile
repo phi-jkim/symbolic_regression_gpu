@@ -20,6 +20,13 @@ $(TARGET): $(SRC)
 run_gpu: eval_tree.cu run_gpu.cu
 	$(NVCC) $(NVFLAGS) -o $@ run_gpu.cu eval_tree.cu
 
+run_async_test: eval_tree.cu run_async_test.cu
+	$(NVCC) $(NVFLAGS) -o $@ run_async_test.cu eval_tree.cu
+
+.PHONY: test_async
+test_async: run_async_test
+	./run_async_test
+
 # Test target
 $(TEST_BIN): $(TEST_DIR)/test_eval.cpp eval_tree.cu
 	$(NVCC) $(NVFLAGS) -I$(TEST_DIR) -o $@ $(TEST_DIR)/test_eval.cpp eval_tree.cu
