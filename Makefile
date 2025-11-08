@@ -6,7 +6,17 @@ NVFLAGS ?= -O3 \
 TARGET := libevaltree.so
 SRC := eval_tree.cu
 
+<<<<<<< HEAD
 all: $(TARGET) run_gpu run_evogp
+=======
+# Test and benchmark directories
+TEST_DIR := src/test
+BENCH_DIR := src/bench
+TEST_BIN := test_eval
+BENCH_BIN := benchmark_eval
+
+all: $(TARGET) run_gpu
+>>>>>>> refs/remotes/origin/master
 
 $(TARGET): $(SRC)
 	$(NVCC) $(NVFLAGS) -Xcompiler -fPIC -shared -o $@ $<
@@ -14,11 +24,24 @@ $(TARGET): $(SRC)
 run_gpu: eval_tree.cu run_gpu.cu
 	$(NVCC) $(NVFLAGS) -o $@ run_gpu.cu eval_tree.cu
 
-# Benchmark evogp's treeGPEvalKernel via evogp::evaluate on the same dataset
-EVOGP_FWD := ../evogp/src/evogp/cuda/forward.cu
-EVOGP_INC := -I../evogp/src/evogp/cuda
-run_evogp: run_evogp.cu eval_tree.cu $(EVOGP_FWD)
-	$(NVCC) $(NVFLAGS) $(EVOGP_INC) -o $@ run_evogp.cu eval_tree.cu $(EVOGP_FWD)
+# Test target
+$(TEST_BIN): $(TEST_DIR)/test_eval.cpp eval_tree.cu
+	$(NVCC) $(NVFLAGS) -I$(TEST_DIR) -o $@ $(TEST_DIR)/test_eval.cpp eval_tree.cu
+
+test: $(TEST_BIN)
+	./$(TEST_BIN)
+
+# Benchmark target
+$(BENCH_BIN): $(BENCH_DIR)/benchmark_eval.cpp eval_tree.cu
+	$(NVCC) $(NVFLAGS) -I$(BENCH_DIR) -o $@ $(BENCH_DIR)/benchmark_eval.cpp eval_tree.cu
+
+bench: $(BENCH_BIN)
+	./$(BENCH_BIN)
+
+# Convenience targets
+run_test: test
+
+run_bench: bench
 
 clean:
-	rm -f $(TARGET) run_gpu run_evogp
+	rm -f $(TARGET) run_gpu $(TEST_BIN) $(BENCH_BIN)

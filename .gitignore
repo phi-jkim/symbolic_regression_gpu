@@ -1,0 +1,6 @@
+# Ignore all data except examples
+data/*
+!data/examples/
+
+.vscode/
+.venv/

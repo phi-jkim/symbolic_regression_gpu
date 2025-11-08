@@ -1,11 +1,6 @@
 # symbolic_regression_gpu
 
-Optimized single-point prefix-tree evaluation on CPU and a single-thread CUDA kernel, plus a Julia example using SymbolicRegression.jl.
-
-This doc covers:
-- Starting an interactive GPU session on MIT Engaging (SLURM)
-- Building and running the CUDA implementation
-- Running the Julia single-point example
+single-point prefix-tree evaluation on CPU and a single-thread CUDA kernel, plus a Julia example using SymbolicRegression.jl.
 
 sin(x0)+cos(x1)+3 @ [0.5,1.2] -> cpu=3.8417833 gpu=3.8417833
 sin(x0)+cos(x1)+3 @ [0.5,1.2] timings: cpu_avg_us=0.090 (iters=1000) gpu_avg_us=135.350 (iters=100)
