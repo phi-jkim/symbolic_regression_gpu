@@ -110,3 +110,5 @@ It prints the evaluation for two points with the expression `sin(x1) + cos(x2) +
 - Fused multiply-add (FMA) for `(a*b) +/- c` patterns using a lightweight tagged stack for multiplicative subexpressions.
 - Safe variants for DIV/LOG to reduce NaNs/Infs.
 
+
+Eval 
