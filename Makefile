@@ -6,9 +6,6 @@ NVFLAGS ?= -O3 \
 TARGET := libevaltree.so
 SRC := eval_tree.cu
 
-<<<<<<< HEAD
-all: $(TARGET) run_gpu run_evogp
-=======
 # Test and benchmark directories
 TEST_DIR := src/test
 BENCH_DIR := src/bench
@@ -16,13 +13,19 @@ TEST_BIN := test_eval
 BENCH_BIN := benchmark_eval
 
 all: $(TARGET) run_gpu
->>>>>>> refs/remotes/origin/master
 
 $(TARGET): $(SRC)
 	$(NVCC) $(NVFLAGS) -Xcompiler -fPIC -shared -o $@ $<
 
 run_gpu: eval_tree.cu run_gpu.cu
 	$(NVCC) $(NVFLAGS) -o $@ run_gpu.cu eval_tree.cu
+
+run_async_test: eval_tree.cu run_async_test.cu
+	$(NVCC) $(NVFLAGS) -o $@ run_async_test.cu eval_tree.cu
+
+.PHONY: test_async
+test_async: run_async_test
+	./run_async_test
 
 # Test target
 $(TEST_BIN): $(TEST_DIR)/test_eval.cpp eval_tree.cu
