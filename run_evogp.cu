@@ -24,7 +24,18 @@ extern "C" void eval_tree_gpu(const int* tokens,
                                int num_features,
                                float* out_host);
 
-// parallelism over both population and data points and async loading
+// batch evaluator (datapoint-parallel) from eval_tree.cu
+extern "C" void eval_tree_gpu_batch(const int* tokens,
+                                    const float* values,
+                                    const float* X,
+                                    int len,
+                                    int num_features,
+                                    int dataPoints,
+                                    float* out_dev,
+                                    int blocks,
+                                    int threads);
+
+// population x datapoints async evaluator
 extern "C" void eval_tree_gpu_pop_dp_async(const int* tokens_all,
                                             const float* values_all,
                                             const int* offsets,
@@ -158,53 +169,50 @@ static inline int arity_of_eval_op(int op) {
     }
 }
 
-// ---------- Bench: population x datapoints async evaluator ----------
+// ---------- Config for batch benchmark stabilization ----------
+struct BatchBenchCfg {
+    int threads = 256;
+    int min_len_pad = 8;      // ensure at least this many ops via semantic-NOP padding
+    bool pad_with_neg_pairs = true; // even count of NEG around the expression (NEG(NEG(x)) == x)
+};
 
-static float bench_eval_tree_popdp_async(unsigned int popSize,
-                                         unsigned int dataPoints,
-                                         unsigned int maxGPLen,
-                                         unsigned int varLen,
-                                         unsigned int et_threads,
-                                         float* cur_val, int16_t* cur_type, int16_t* cur_size,
-                                         float* d_Xdp) {
-    auto valid_prefix_types = [&](const int16_t* tptr, int len){ return valid_prefix_types_canon(tptr, len); };
+// ---------- Helpers to build concatenated tokens/values ----------
+struct Workset {
+    std::vector<int>   offsets;
+    std::vector<int>   lengths;
+    std::vector<int>   tokens;
+    std::vector<float> values;
+    size_t tokensN = 0;
+};
 
-    // Pull current population encodings to host
-    std::vector<float> h_val(popSize * maxGPLen);
-    std::vector<int16_t> h_type(popSize * maxGPLen);
-    std::vector<int16_t> h_size(popSize * maxGPLen);
-    gpu_check(cudaMemcpy(h_val.data(),  cur_val,  sizeof(float)   * h_val.size(),  cudaMemcpyDeviceToHost),  "D2H cur_val (bench)");
-    gpu_check(cudaMemcpy(h_type.data(), cur_type, sizeof(int16_t) * h_type.size(), cudaMemcpyDeviceToHost), "D2H cur_type (bench)");
-    gpu_check(cudaMemcpy(h_size.data(), cur_size, sizeof(int16_t) * h_size.size(), cudaMemcpyDeviceToHost), "D2H cur_size (bench)");
-
-    // Build concatenated prefix arrays
-    std::vector<int>   h_offsets(popSize);
-    std::vector<int>   h_lengths(popSize);
-    std::vector<int>   h_tokens; h_tokens.reserve(popSize * maxGPLen);
-    std::vector<float> h_values; h_values.reserve(popSize * maxGPLen);
-
-    auto prefix_effective_len = [&](const int16_t* tptr, int len){ return prefix_effective_len_canon(tptr, len); };
+static Workset build_workset_for_async(unsigned int popSize,
+                                       unsigned int maxGPLen,
+                                       const std::vector<float>& h_val,
+                                       const std::vector<int16_t>& h_type,
+                                       const std::vector<int16_t>& h_size) {
+    Workset w;
+    w.offsets.resize(popSize);
+    w.lengths.resize(popSize);
+    w.tokens.reserve(popSize * maxGPLen);
+    w.values.reserve(popSize * maxGPLen);
 
     for (unsigned int n = 0; n < popSize; ++n) {
         const size_t base = n * maxGPLen;
         int len_all = (int)h_size[base + 0];
-        int len = len_all;
-        if (len < 0) len = 0;
-        h_offsets[n] = (int)h_tokens.size();
-        if (!valid_prefix_types(&h_type[base], len)) {
-            h_lengths[n] = 0; // skip invalid
+        int len = len_all; if (len < 0) len = 0;
+        w.offsets[n] = (int)w.tokens.size();
+        if (!valid_prefix_types_canon(&h_type[base], len)) {
+            w.lengths[n] = 0; // invalid -> skip
             continue;
         }
-        // Trim to minimal valid prefix that yields a single value
-        int eff_len = prefix_effective_len(&h_type[base], len);
-        int start = len_all - eff_len;
-        if (start < 0) start = 0;
-        h_lengths[n] = eff_len;
+        int eff_len = prefix_effective_len_canon(&h_type[base], len);
+        int start = len_all - eff_len; if (start < 0) start = 0;
+        w.lengths[n] = eff_len;
         for (int i = start; i < len_all; ++i) {
             int16_t t_full = h_type[base + i];
             int16_t t = t_full & 0x7F;
-            if (t == 0) { h_tokens.push_back(-1); h_values.push_back(h_val[base + i]); }
-            else if (t == 1) { h_tokens.push_back(0);  h_values.push_back(h_val[base + i]); }
+            if (t == 0) { w.tokens.push_back(-1); w.values.push_back(h_val[base + i]); }
+            else if (t == 1) { w.tokens.push_back(0);  w.values.push_back(h_val[base + i]); }
             else {
                 int f;
                 if (t_full & 0x80) {
@@ -213,32 +221,116 @@ static float bench_eval_tree_popdp_async(unsigned int popSize,
                 } else {
                     f = (int)h_val[base + i];
                 }
-                h_tokens.push_back(map_evogp_to_eval(f));
-                h_values.push_back(0.0f);
+                w.tokens.push_back(map_evogp_to_eval(f));
+                w.values.push_back(0.0f);
             }
         }
     }
+    w.tokensN = w.tokens.size();
+    return w;
+}
+
+// Build a stabilized workset for batch timing (pads too-short or invalid trees)
+static Workset build_workset_for_batch(unsigned int popSize,
+                                       unsigned int maxGPLen,
+                                       const std::vector<float>& h_val,
+                                       const std::vector<int16_t>& h_type,
+                                       const std::vector<int16_t>& h_size,
+                                       const BatchBenchCfg& cfg) {
+    Workset w;
+    w.offsets.resize(popSize);
+    w.lengths.resize(popSize);
+    w.tokens.reserve(popSize * maxGPLen);
+    w.values.reserve(popSize * maxGPLen);
+
+    const int pad_target = std::max(0, cfg.min_len_pad);
+
+    for (unsigned int n = 0; n < popSize; ++n) {
+        const size_t base = n * maxGPLen;
+        const int len_all = (int)h_size[base + 0];
+        w.offsets[n] = (int)w.tokens.size();
+
+        bool valid = (len_all > 0) && valid_prefix_types_canon(&h_type[base], len_all);
+        if (!valid) {
+            // Replace with default VAR0, then pad with even NEG to reach pad_target
+            // Prefix: [ ... many NEG ... , VAR, 0 ]
+            int cur_len = 1; // VAR
+            int pad_needed = std::max(0, pad_target - cur_len);
+            int neg_to_add = cfg.pad_with_neg_pairs ? ((pad_needed + 1) / 2) * 2 : pad_needed;
+            for (int i = 0; i < neg_to_add; ++i) { w.tokens.push_back(25); w.values.push_back(0.0f); } // OP_NEG
+            w.tokens.push_back(-1); w.values.push_back(0.0f); // VAR 0
+            w.lengths[n] = neg_to_add + 1;
+            continue;
+        }
+
+        int eff_len = prefix_effective_len_canon(&h_type[base], len_all);
+        int start = len_all - eff_len; if (start < 0) start = 0;
+
+        // Pad: add even number of NEG at the *front* so semantics preserved (NEG(NEG(x)) == x)
+        int pad_needed = std::max(0, pad_target - eff_len);
+        int neg_to_add = cfg.pad_with_neg_pairs ? ((pad_needed + 1) / 2) * 2 : pad_needed;
+        for (int i = 0; i < neg_to_add; ++i) { w.tokens.push_back(25); w.values.push_back(0.0f); } // OP_NEG
+
+        for (int i = start; i < len_all; ++i) {
+            int16_t t_full = h_type[base + i];
+            int16_t t = t_full & 0x7F;
+            if (t == 0) { w.tokens.push_back(-1); w.values.push_back(h_val[base + i]); }
+            else if (t == 1) { w.tokens.push_back(0);  w.values.push_back(h_val[base + i]); }
+            else {
+                int f;
+                if (t_full & 0x80) {
+                    uint32_t bits; std::memcpy(&bits, &h_val[base + i], sizeof(uint32_t));
+                    f = (int)(bits & 0xFFFFu);
+                } else {
+                    f = (int)h_val[base + i];
+                }
+                w.tokens.push_back(map_evogp_to_eval(f));
+                w.values.push_back(0.0f);
+            }
+        }
+        w.lengths[n] = neg_to_add + eff_len;
+    }
+    w.tokensN = w.tokens.size();
+    return w;
+}
+
+// ---------- Bench: population x datapoints async evaluator ----------
+static float bench_eval_tree_popdp_async(unsigned int popSize,
+                                         unsigned int dataPoints,
+                                         unsigned int maxGPLen,
+                                         unsigned int varLen,
+                                         unsigned int et_threads,
+                                         float* cur_val, int16_t* cur_type, int16_t* cur_size,
+                                         float* d_Xdp) {
+    // Pull current population encodings to host
+    std::vector<float> h_val(popSize * maxGPLen);
+    std::vector<int16_t> h_type(popSize * maxGPLen);
+    std::vector<int16_t> h_size(popSize * maxGPLen);
+    gpu_check(cudaMemcpy(h_val.data(),  cur_val,  sizeof(float)   * h_val.size(),  cudaMemcpyDeviceToHost),  "D2H cur_val (bench)");
+    gpu_check(cudaMemcpy(h_type.data(), cur_type, sizeof(int16_t) * h_type.size(), cudaMemcpyDeviceToHost), "D2H cur_type (bench)");
+    gpu_check(cudaMemcpy(h_size.data(), cur_size, sizeof(int16_t) * h_size.size(), cudaMemcpyDeviceToHost), "D2H cur_size (bench)");
+
+    Workset ws = build_workset_for_async(popSize, maxGPLen, h_val, h_type, h_size);
 
     // Device buffers
     int *d_offsets_all=nullptr, *d_lengths_all=nullptr, *d_tokens_all=nullptr;
     float *d_values_all=nullptr, *d_out_all=nullptr;
-    const size_t tokensN = h_tokens.size();
-    gpu_check(cudaMalloc(&d_offsets_all, sizeof(int) * h_offsets.size()), "cudaMalloc offsets_all");
-    gpu_check(cudaMalloc(&d_lengths_all, sizeof(int) * h_lengths.size()), "cudaMalloc lengths_all");
-    if (tokensN > 0) {
-        gpu_check(cudaMalloc(&d_tokens_all, sizeof(int) * tokensN), "cudaMalloc tokens_all");
-        gpu_check(cudaMalloc(&d_values_all, sizeof(float) * tokensN), "cudaMalloc values_all");
+    gpu_check(cudaMalloc(&d_offsets_all, sizeof(int) * ws.offsets.size()), "cudaMalloc offsets_all");
+    gpu_check(cudaMalloc(&d_lengths_all, sizeof(int) * ws.lengths.size()), "cudaMalloc lengths_all");
+    if (ws.tokensN > 0) {
+        gpu_check(cudaMalloc(&d_tokens_all, sizeof(int) * ws.tokensN), "cudaMalloc tokens_all");
+        gpu_check(cudaMalloc(&d_values_all, sizeof(float) * ws.tokensN), "cudaMalloc values_all");
     }
     gpu_check(cudaMalloc(&d_out_all, sizeof(float) * (size_t)popSize * (size_t)dataPoints), "cudaMalloc out_all");
 
-    gpu_check(cudaMemcpy(d_offsets_all, h_offsets.data(), sizeof(int) * h_offsets.size(), cudaMemcpyHostToDevice), "H2D offsets_all");
-    gpu_check(cudaMemcpy(d_lengths_all, h_lengths.data(), sizeof(int) * h_lengths.size(), cudaMemcpyHostToDevice), "H2D lengths_all");
-    if (tokensN > 0) {
-        gpu_check(cudaMemcpy(d_tokens_all, h_tokens.data(), sizeof(int) * tokensN, cudaMemcpyHostToDevice), "H2D tokens_all");
-        gpu_check(cudaMemcpy(d_values_all, h_values.data(), sizeof(float) * tokensN, cudaMemcpyHostToDevice), "H2D values_all");
+    gpu_check(cudaMemcpy(d_offsets_all, ws.offsets.data(), sizeof(int) * ws.offsets.size(), cudaMemcpyHostToDevice), "H2D offsets_all");
+    gpu_check(cudaMemcpy(d_lengths_all, ws.lengths.data(), sizeof(int) * ws.lengths.size(), cudaMemcpyHostToDevice), "H2D lengths_all");
+    if (ws.tokensN > 0) {
+        gpu_check(cudaMemcpy(d_tokens_all, ws.tokens.data(), sizeof(int) * ws.tokensN, cudaMemcpyHostToDevice), "H2D tokens_all");
+        gpu_check(cudaMemcpy(d_values_all, ws.values.data(), sizeof(float) * ws.tokensN, cudaMemcpyHostToDevice), "H2D values_all");
     }
 
-    // Launch and time
+    // Warmup + timed
     cudaEvent_t te0, te1;
     gpu_check(cudaEventCreate(&te0), "cudaEventCreate te0");
     gpu_check(cudaEventCreate(&te1), "cudaEventCreate te1");
@@ -246,11 +338,10 @@ static float bench_eval_tree_popdp_async(unsigned int popSize,
     int threads = (int)et_threads;
     int blocks_y = (int)((dataPoints + threads - 1) / threads);
 
-    // Warmup
     eval_tree_gpu_pop_dp_async(d_tokens_all, d_values_all, d_offsets_all, d_lengths_all,
                                (int)popSize, d_Xdp, (int)varLen, (int)dataPoints,
                                d_out_all, blocks_y, threads);
-    gpu_check(cudaDeviceSynchronize(), "warmup sync");
+    gpu_check(cudaDeviceSynchronize(), "warmup async sync");
 
     gpu_check(cudaEventRecord(te0), "cudaEventRecord te0");
     eval_tree_gpu_pop_dp_async(d_tokens_all, d_values_all, d_offsets_all, d_lengths_all,
@@ -259,12 +350,6 @@ static float bench_eval_tree_popdp_async(unsigned int popSize,
     gpu_check(cudaEventRecord(te1), "cudaEventRecord te1");
     gpu_check(cudaEventSynchronize(te1), "cudaEventSynchronize te1");
 
-    {
-        auto err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            std::fprintf(stderr, "eval_tree_gpu_pop_dp_async kernel error: %s\n", cudaGetErrorString(err));
-        }
-    }
     float ms = 0.0f; gpu_check(cudaEventElapsedTime(&ms, te0, te1), "cudaEventElapsedTime");
     cudaEventDestroy(te0); cudaEventDestroy(te1);
 
@@ -275,8 +360,94 @@ static float bench_eval_tree_popdp_async(unsigned int popSize,
     return ms;
 }
 
-// ---------- SR_fitness timing wrapper ----------
+// ---------- Bench: batch evaluator across the entire population ----------
+static float bench_eval_tree_batch(unsigned int popSize,
+                                   unsigned int dataPoints,
+                                   unsigned int maxGPLen,
+                                   unsigned int varLen,
+                                   unsigned int et_threads,
+                                   float* cur_val, int16_t* cur_type, int16_t* cur_size,
+                                   float* d_Xdp,
+                                   const BatchBenchCfg& cfg) {
+    // Pull population encodings
+    std::vector<float> h_val(popSize * maxGPLen);
+    std::vector<int16_t> h_type(popSize * maxGPLen);
+    std::vector<int16_t> h_size(popSize * maxGPLen);
+    gpu_check(cudaMemcpy(h_val.data(),  cur_val,  sizeof(float)   * h_val.size(),  cudaMemcpyDeviceToHost),  "D2H cur_val (batch)");
+    gpu_check(cudaMemcpy(h_type.data(), cur_type, sizeof(int16_t) * h_type.size(), cudaMemcpyDeviceToHost), "D2H cur_type (batch)");
+    gpu_check(cudaMemcpy(h_size.data(), cur_size, sizeof(int16_t) * h_size.size(), cudaMemcpyDeviceToHost), "D2H cur_size (batch)");
 
+    // Build a stabilized workset (pads invalid/short to min_len_pad with even NEG pairs)
+    Workset ws = build_workset_for_batch(popSize, maxGPLen, h_val, h_type, h_size, cfg);
+
+    // Compute max program length to size device token/value staging buffers once
+    int max_len = 0;
+    for (unsigned int n = 0; n < popSize; ++n) max_len = std::max(max_len, ws.lengths[n]);
+    if (max_len <= 0) {
+        // Nothing to run; return ~0 time
+        return 0.0f;
+    }
+
+    // Device staging buffers for one tree's tokens/values, reused for all trees
+    int   *d_tokens = nullptr;
+    float *d_values = nullptr;
+    gpu_check(cudaMalloc(&d_tokens, sizeof(int)   * max_len), "cudaMalloc d_tokens(batch all)");
+    gpu_check(cudaMalloc(&d_values, sizeof(float) * max_len), "cudaMalloc d_values(batch all)");
+
+    // Output buffer for all trees [popSize, dataPoints] — primarily to keep parity with async path
+    float *d_out_all = nullptr;
+    gpu_check(cudaMalloc(&d_out_all, sizeof(float) * (size_t)popSize * (size_t)dataPoints), "cudaMalloc d_out_all(batch)");
+
+    // Launch geometry (same for every tree)
+    int threads = cfg.threads > 0 ? cfg.threads : (int)et_threads;
+    int blocks  = (dataPoints + threads - 1) / threads;
+
+    // -------- Warmup pass over ALL trees --------
+    for (unsigned int n = 0; n < popSize; ++n) {
+        const int len = ws.lengths[n];
+        if (len <= 0) continue;
+        const int off = ws.offsets[n];
+
+        gpu_check(cudaMemcpy(d_tokens, ws.tokens.data() + off, sizeof(int)   * len, cudaMemcpyHostToDevice), "H2D tokens(batch warmup)");
+        gpu_check(cudaMemcpy(d_values, ws.values.data() + off, sizeof(float) * len, cudaMemcpyHostToDevice), "H2D values(batch warmup)");
+
+        float* out_slice = d_out_all + (size_t)n * (size_t)dataPoints;
+        eval_tree_gpu_batch(d_tokens, d_values, d_Xdp, len, (int)varLen, (int)dataPoints, out_slice, blocks, threads);
+    }
+    gpu_check(cudaDeviceSynchronize(), "warmup batch(all) sync");
+
+    // -------- Timed pass over ALL trees --------
+    cudaEvent_t te0, te1;
+    gpu_check(cudaEventCreate(&te0), "cudaEventCreate te0(batch all)");
+    gpu_check(cudaEventCreate(&te1), "cudaEventCreate te1(batch all)");
+    gpu_check(cudaEventRecord(te0), "cudaEventRecord te0(batch all)");
+
+    for (unsigned int n = 0; n < popSize; ++n) {
+        const int len = ws.lengths[n];
+        if (len <= 0) continue;
+        const int off = ws.offsets[n];
+
+        gpu_check(cudaMemcpy(d_tokens, ws.tokens.data() + off, sizeof(int)   * len, cudaMemcpyHostToDevice), "H2D tokens(batch timed)");
+        gpu_check(cudaMemcpy(d_values, ws.values.data() + off, sizeof(float) * len, cudaMemcpyHostToDevice), "H2D values(batch timed)");
+
+        float* out_slice = d_out_all + (size_t)n * (size_t)dataPoints;
+        eval_tree_gpu_batch(d_tokens, d_values, d_Xdp, len, (int)varLen, (int)dataPoints, out_slice, blocks, threads);
+    }
+
+    gpu_check(cudaEventRecord(te1), "cudaEventRecord te1(batch all)");
+    gpu_check(cudaEventSynchronize(te1), "cudaEventSynchronize te1(batch all)");
+    float ms = 0.0f; gpu_check(cudaEventElapsedTime(&ms, te0, te1), "cudaEventElapsedTime(batch all)");
+    cudaEventDestroy(te0); cudaEventDestroy(te1);
+
+    // Cleanup
+    cudaFree(d_tokens);
+    cudaFree(d_values);
+    cudaFree(d_out_all);
+
+    return ms;
+}
+
+// ---------- SR_fitness timing wrapper ----------
 static float sr_avg(unsigned int popSize,
                     unsigned int dataPoints,
                     unsigned int maxGPLen,
@@ -308,6 +479,7 @@ struct CmdCfg {
     unsigned int gens = 2;
     unsigned int et_threads = 256; // threads per block
     unsigned int enable_check = 0; // 1 to enable correctness checks
+    int          pad_min_len = 8;  // batch pad target
 };
 
 static inline bool starts_with(const char* s, const char* pfx) {
@@ -318,7 +490,7 @@ static void parse_args(int argc, char** argv, CmdCfg& cfg) {
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         if (std::strcmp(a, "--help") == 0 || std::strcmp(a, "-h") == 0) {
-            std::printf("Usage: %s [--pop N] [--points N] [--gens N] [--threads N] [--check 0|1]\n", argv[0]);
+            std::printf("Usage: %s [--pop N] [--points N] [--gens N] [--threads N] [--check 0|1] [--pad_min_len N]\n", argv[0]);
             std::printf("Also supports positional: %s <pop> <points> <gens> <threads> <check>\n", argv[0]);
             std::exit(0);
         } else if (starts_with(a, "--pop")) {
@@ -331,6 +503,8 @@ static void parse_args(int argc, char** argv, CmdCfg& cfg) {
             const char* v = std::strchr(a, '='); if (!v && i + 1 < argc) v = argv[++i]; else if (v) ++v; if (v) cfg.et_threads = (unsigned)std::strtoul(v, nullptr, 10);
         } else if (starts_with(a, "--check")) {
             const char* v = std::strchr(a, '='); if (!v && i + 1 < argc) v = argv[++i]; else if (v) ++v; if (v) cfg.enable_check = (unsigned)std::strtoul(v, nullptr, 10);
+        } else if (starts_with(a, "--pad_min_len")) {
+            const char* v = std::strchr(a, '='); if (!v && i + 1 < argc) v = argv[++i]; else if (v) ++v; if (v) cfg.pad_min_len = (int)std::strtol(v, nullptr, 10);
         }
     }
     if (argc > 1 && std::isdigit((unsigned char)argv[1][0])) cfg.popSize    = (unsigned)std::strtoul(argv[1], nullptr, 10);
@@ -409,7 +583,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Buffers for EVOGP SR_fitness & async eval benchmark
+    // Buffers for EVOGP SR_fitness & eval benchmarks
     std::vector<float> h_vars(popSize * varLen);
     gpu_check(cudaMalloc(&d_vars, sizeof(float) * h_vars.size()), "cudaMalloc d_vars");
     gpu_check(cudaMalloc(&d_res, sizeof(float) * popSize * outLen), "cudaMalloc d_res");
@@ -427,7 +601,7 @@ int main(int argc, char** argv) {
     SR_fitness(popSize, dataPoints, maxGPLen, varLen, outLen, true, d_val, d_type, d_size, d_Xdp, d_labels, d_fitness, 4);
     gpu_check(cudaDeviceSynchronize(), "SR_fitness warmup sync");
 
-    // Optional deterministic correctness check
+    // Optional deterministic correctness check (augmented counters)
     auto valid_prefix_types = [&](const int16_t* tptr, int len){ return valid_prefix_types_canon(tptr, len); };
 
     auto check_correctness = [&](const char* tag, float* cur_val, int16_t* cur_type, int16_t* cur_size) {
@@ -444,12 +618,17 @@ int main(int argc, char** argv) {
         for (int i = 0; i < sTrees; ++i) trees.push_back((unsigned int)(std::rand() % (int)popSize));
         for (int i = 0; i < sPoints; ++i) points.push_back((unsigned int)(std::rand() % (int)dataPoints));
 
+        size_t attempted_pairs = (size_t)trees.size() * (size_t)points.size();
+        size_t checked_pairs   = 0;
+        size_t finite_pairs    = 0;
+        size_t skipped_pairs   = 0;
+        std::vector<uint8_t> tree_had_valid(popSize, 0);
+
         double sum_err = 0.0, max_err = 0.0; unsigned int worst_t = 0, worst_k = 0; size_t pairs = 0;
         size_t nf_one_side = 0, nf_both = 0;
         size_t finite_logged = 0, finite_cap = 6;
-        size_t skipped = 0, skip_logged = 0, skip_cap = 16;
+        size_t skip_logged = 0, skip_cap = 16;
         std::vector<float> out_host(popSize);
-        bool traced = false;
 
         auto prefix_effective_len = [&](const int16_t* tptr, int len){ return prefix_effective_len_canon(tptr, len); };
 
@@ -460,8 +639,6 @@ int main(int argc, char** argv) {
                 float* dst = &h_vars[n * varLen];
                 for (unsigned int j = 0; j < varLen; ++j) dst[j] = xk[j];
             }
-            (void)cudaDeviceSynchronize();
-            (void)cudaGetLastError();
             gpu_check(cudaMemcpy(d_vars, h_vars.data(), sizeof(float) * h_vars.size(), cudaMemcpyHostToDevice), "H2D vars chk");
             evaluate(popSize, maxGPLen, varLen, outLen, cur_val, cur_type, cur_size, d_vars, d_res);
             gpu_check(cudaDeviceSynchronize(), "chk eval sync");
@@ -470,16 +647,11 @@ int main(int argc, char** argv) {
             for (unsigned int ti = 0; ti < trees.size(); ++ti) {
                 unsigned int n = trees[ti];
                 size_t base = n * maxGPLen; int len_total = (int)h_size[base + 0];
-                if (len_total <= 0) continue;
-
-                if (!valid_prefix_types(&h_type[base], len_total)) {
-                    ++skipped;
+                if (len_total <= 0 || !valid_prefix_types(&h_type[base], len_total)) {
+                    ++skipped_pairs;
                     if (skip_logged < skip_cap) {
                         ++skip_logged;
                         std::fprintf(stderr, "[check %s] INVALID prefix tree=%u len_total=%d (k=%u)\n", tag, n, len_total, k);
-                        std::fprintf(stderr, "  types: ");
-                        for (int ii = 0; ii < std::min(len_total, 64); ++ii) std::fprintf(stderr, "%s%d", ii?", ":"", (int)(h_type[base+ii] & 0x7F));
-                        std::fprintf(stderr, "\n");
                     }
                     continue;
                 }
@@ -507,133 +679,67 @@ int main(int argc, char** argv) {
                     }
                 }
 
+                checked_pairs++;
                 float out_et = 0.0f; eval_tree_gpu(tok.data(), val.data(), xk, eff_len, (int)varLen, &out_et);
+
                 double a = (double)out_host[n];
                 double b = (double)out_et;
-                if (!std::isfinite(a) || !std::isfinite(b)) {
+                if (std::isfinite(a) && std::isfinite(b)) {
+                    finite_pairs++; tree_had_valid[n] = 1;
+                    double err = std::abs(a - b);
+                    sum_err += err; ++pairs; if (err > max_err) { max_err = err; worst_t = n; worst_k = k; }
+                    if (err > tol && finite_logged < finite_cap) {
+                        ++finite_logged;
+                        std::fprintf(stderr, "[debug %s finite-mismatch] tree=%u k=%u len=%d EVOGP=%.7g eval_tree=%.7g err=%.7g\n",
+                                     tag, n, k, eff_len, a, b, err);
+                    }
+                } else {
                     if (std::isfinite(a) ^ std::isfinite(b)) {
-                        ++nf_one_side;
-                        double err_nf = 1e9;
-                        sum_err += err_nf;
+                        ++nf_one_side; double err_nf = 1e9; sum_err += err_nf;
                         if (err_nf > max_err) { max_err = err_nf; worst_t = n; worst_k = k; }
-                        if (nf_one_side <= 6) {
-                            std::fprintf(stderr, "[debug %s one-side-nonfinite] tree=%u k=%u len=%d EVOGP=%.7g eval_tree=%.7g\n",
-                                         tag, n, k, eff_len, a, b);
-                        }
                     } else {
                         ++nf_both;
                     }
-                    continue;
-                }
-
-                double err = std::abs(a - b);
-                sum_err += err; ++pairs; if (err > max_err) { max_err = err; worst_t = n; worst_k = k; }
-                if (err > tol && finite_logged < finite_cap) {
-                    ++finite_logged;
-                    std::fprintf(stderr, "[debug %s finite-mismatch] tree=%u k=%u len=%d EVOGP=%.7g eval_tree=%.7g err=%.7g\n",
-                                 tag, n, k, eff_len, a, b, err);
-                    std::fprintf(stderr, "  tok: "); for (int ii=0; ii<std::min(eff_len, 64); ++ii) std::fprintf(stderr, "%s%d", ii?", ":"", tok[ii]); std::fprintf(stderr, "\n");
-                    std::fprintf(stderr, "  val: "); for (int ii=0; ii<std::min(eff_len, 64); ++ii) std::fprintf(stderr, "%s%.7g", ii?", ":"", val[ii]); std::fprintf(stderr, "\n");
-                    std::fprintf(stderr, "  x: "); for (unsigned int jj=0;jj<varLen;++jj) std::fprintf(stderr, "%s%.7g", jj?", ":"", xk[jj]); std::fprintf(stderr, "\n");
-
-                    // Per-token step trace (using host math float forms from <math.h>)
-                    std::vector<float> st; st.reserve(eff_len);
-                    std::fprintf(stderr, "[trace %s] begin per-token evaluation tree=%u k=%u len=%d\n", tag, n, k, eff_len);
-                    for (int ii = eff_len - 1; ii >= 0; --ii) {
-                        int ttok = tok[ii];
-                        if (ttok == 0) {
-                            float cv = val[ii]; st.push_back(cv);
-                            std::fprintf(stderr, "  i=%d CONST v=%.7g -> sp=%zu\n", ii, cv, st.size());
-                        } else if (ttok == -1) {
-                            int idx2 = (int)val[ii];
-                            float vx = (idx2>=0 && idx2<(int)varLen) ? xk[idx2] : 0.0f; st.push_back(vx);
-                            std::fprintf(stderr, "  i=%d VAR idx=%d v=%.7g -> sp=%zu\n", ii, idx2, vx, st.size());
-                        } else {
-                            int ar = arity_of_eval_op(ttok);
-                            if (ar == 1) {
-                                float A = st.back(); st.pop_back();
-                                float R;
-                                switch (ttok) {
-                                    case 5:  R = ::sinf(A); break;
-                                    case 6:  R = ::cosf(A); break;
-                                    case 7:  R = ::expf(A); break;
-                                    case 8:  R = ::logf(A); break;
-                                    case 18: R = ::tanf(A); break;
-                                    case 19: R = ::sinhf(A); break;
-                                    case 20: R = ::coshf(A); break;
-                                    case 21: R = ::tanhf(A); break;
-                                    case 22: R = (A==0.0f) ? -1e9f : ::logf(::fabsf(A)); break;
-                                    case 23: R = (A==0.0f) ? NAN   : 1.0f/A; break;
-                                    case 24: { float d = (::fabsf(A)<=1e-9f) ? (A<0?-1e-9f:1e-9f) : A; R = 1.0f/d; } break;
-                                    case 25: R = -A; break;
-                                    case 26: R = ::fabsf(A); break;
-                                    case 27: R = ::sqrtf(A); break;
-                                    case 28: R = ::sqrtf(::fabsf(A)); break;
-                                    default: R = 0.0f; break;
-                                }
-                                st.push_back(R);
-                                std::fprintf(stderr, "  i=%d %s a=%.7g -> r=%.7g sp=%zu\n", ii, op_name_short(ttok), A, R, st.size());
-                            } else if (ar == 2) {
-                                float A = st.back(); st.pop_back();
-                                float B2 = st.back(); st.pop_back();
-                                float R;
-                                switch (ttok) {
-                                    case 1:  R = A + B2; break;
-                                    case 2:  R = A - B2; break;
-                                    case 3:  R = A * B2; break;
-                                    case 4:  R = (B2 == 0.0f) ? NAN : (A / B2); break;
-                                    case 9:  { float denom = (::fabsf(B2)<=1e-9f) ? (B2<0?-1e-9f:1e-9f) : B2; R = A / denom; } break;
-                                    case 10: R = ::powf(A, B2); break;
-                                    case 11: R = (A==0.0f && B2==0.0f) ? 0.0f : ::powf(::fabsf(A), B2); break;
-                                    case 12: R = (A >= B2) ? A : B2; break;
-                                    case 13: R = (A <= B2) ? A : B2; break;
-                                    case 14: R = (A <  B2) ? 1.0f : -1.0f; break;
-                                    case 15: R = (A >  B2) ? 1.0f : -1.0f; break;
-                                    case 16: R = (A <= B2) ? 1.0f : -1.0f; break;
-                                    case 17: R = (A >= B2) ? 1.0f : -1.0f; break;
-                                    default: R = 0.0f; break;
-                                }
-                                st.push_back(R);
-                                std::fprintf(stderr, "  i=%d %s a=%.7g b=%.7g -> r=%.7g sp=%zu\n", ii, op_name_short(ttok), A, B2, R, st.size());
-                            } else { // IF
-                                float C = st.back(); st.pop_back();
-                                float B2 = st.back(); st.pop_back();
-                                float A = st.back(); st.pop_back();
-                                float R = (A > 0.0f) ? B2 : C; st.push_back(R);
-                                std::fprintf(stderr, "  i=%d IF cond=%.7g then=%.7g else=%.7g -> r=%.7g sp=%zu\n", ii, A, B2, C, R, st.size());
-                            }
-                        }
-                    }
-                    float final_r = st.empty() ? 0.0f : st.back();
-                    std::fprintf(stderr, "[trace %s] end result=%.7g EVOGP=%.7g eval_tree=%.7g\n", tag, final_r, a, b);
                 }
             }
         }
+        size_t unique_trees_attempted = 200;
+        size_t unique_trees_checked   = 0;
+        for (unsigned int n = 0; n < popSize; ++n) unique_trees_checked += (tree_had_valid[n] ? 1u : 0u);
+
         double mean_err = pairs > 0 ? (sum_err / (double)pairs) : 0.0;
-        if (skipped > 0) {
-            std::printf("[check %s] skipped %zu invalid prefixes (logged %zu), checked %zu pairs\n", tag, skipped, skip_logged, pairs);
-        }
         if (nf_one_side + nf_both > 0) {
             std::printf("[check %s] non-finite: one-side=%zu both=%zu (penalized one-side with 1e9)\n", tag, nf_one_side, nf_both);
         }
-        std::printf("[check %s] abs err mean=%.6e max=%.6e (worst: tree=%u, k=%u) tol=%.1e\n", tag, mean_err, max_err, worst_t, worst_k, tol);
+        std::printf("[check %s] abs err mean=%.6e max=%.6e (worst: tree=%u, k=%u) tol=%.1e\n",
+                    tag, mean_err, max_err, worst_t, worst_k, tol);
+        std::printf("[check %s] pairs: attempted=%zu, checked=%zu, finite=%zu, skipped=%zu\n",
+                    tag, attempted_pairs, checked_pairs, finite_pairs, skipped_pairs);
+        std::printf("[check %s] trees: attempted_unique=%zu, checked_unique=%zu\n",
+                    tag, unique_trees_attempted, unique_trees_checked);
     };
 
     unsigned int gens = cfg.gens;
 
-    // Explicit timing buffers for BOTH stages
+    // Explicit timing buffers for ALL stages
     std::vector<float> sr_times; sr_times.reserve(gens + 1);
-    std::vector<float> et_times; et_times.reserve(gens + 1);
+    std::vector<float> et_async_times; et_async_times.reserve(gens + 1);
+    std::vector<float> et_batch_times; et_batch_times.reserve(gens + 1);
 
-    std::printf("Config: pop=%u, points=%u, gens=%u, threads=%u, check=%u\n",
-                popSize, dataPoints, gens, et_threads, enable_check);
+    BatchBenchCfg batch_cfg;
+    batch_cfg.threads     = (int)cfg.et_threads;
+    batch_cfg.min_len_pad = cfg.pad_min_len;
+
+    std::printf("Config: pop=%u, points=%u, gens=%u, threads=%u, check=%u, pad_min_len=%d\n",
+                popSize, dataPoints, gens, et_threads, enable_check, cfg.pad_min_len);
     if (et_threads % 32 != 0) {
         std::fprintf(stderr, "Warning: threads (%u) is not a multiple of warp size (32).\n", et_threads);
     }
 
     // initial timings
     sr_times.push_back(sr_avg(popSize, dataPoints, maxGPLen, varLen, outLen, d_val, d_type, d_size, d_Xdp, d_labels, d_fitness));
-    et_times.push_back(bench_eval_tree_popdp_async(popSize, dataPoints, maxGPLen, varLen, et_threads, d_val, d_type, d_size, d_Xdp));
+    et_async_times.push_back(bench_eval_tree_popdp_async(popSize, dataPoints, maxGPLen, varLen, et_threads, d_val, d_type, d_size, d_Xdp));
+    et_batch_times.push_back(bench_eval_tree_batch(popSize, dataPoints, maxGPLen, varLen, et_threads, d_val, d_type, d_size, d_Xdp, batch_cfg));
     check_correctness("init", d_val, d_type, d_size);
 
     // Evolution buffers
@@ -712,7 +818,6 @@ int main(int argc, char** argv) {
         gpu_check(cudaMemcpy(d_left,      h_left.data(),      sizeof(int) * popSize, cudaMemcpyHostToDevice), "H2D left");
         gpu_check(cudaMemcpy(d_right,     h_right.data(),     sizeof(int) * popSize, cudaMemcpyHostToDevice), "H2D right");
         gpu_check(cudaMemcpy(d_left_pos,  h_left_pos.data(),  sizeof(int) * popSize, cudaMemcpyHostToDevice), "H2D left_pos");
-        // ---- FIX: add 4th argument kind for right_pos ----
         gpu_check(cudaMemcpy(d_right_pos, h_right_pos.data(), sizeof(int) * popSize, cudaMemcpyHostToDevice), "H2D right_pos");
 
         crossover((int)popSize, (int)popSize, (int)maxGPLen,
@@ -724,25 +829,30 @@ int main(int argc, char** argv) {
         // Timings and checks
         float sr_ms = sr_avg(popSize, dataPoints, maxGPLen, varLen, outLen, d_val_cx, d_type_cx, d_size_cx, d_Xdp, d_labels, d_fitness);
         sr_times.push_back(sr_ms);
-        float et_ms = bench_eval_tree_popdp_async(popSize, dataPoints, maxGPLen, varLen, et_threads, d_val_cx, d_type_cx, d_size_cx, d_Xdp);
-        et_times.push_back(et_ms);
+
+        float et_async_ms = bench_eval_tree_popdp_async(popSize, dataPoints, maxGPLen, varLen, et_threads, d_val_cx, d_type_cx, d_size_cx, d_Xdp);
+        et_async_times.push_back(et_async_ms);
+
+        float et_batch_ms = bench_eval_tree_batch(popSize, dataPoints, maxGPLen, varLen, et_threads, d_val_cx, d_type_cx, d_size_cx, d_Xdp, batch_cfg);
+        et_batch_times.push_back(et_batch_ms);
+
         check_correctness("gen", d_val_cx, d_type_cx, d_size_cx);
 
         cur_val = d_val_cx; cur_type = d_type_cx; cur_size = d_size_cx;
     }
 
-    // Print per-stage and totals clearly
+    // Print per-stage and totals
     std::printf("Per-stage times (ms):\n");
-    std::printf("  idx | SR_fitness (ms) | eval_tree_async (ms)\n");
-    float total_sr = 0.0f, total_et = 0.0f;
-    for (size_t i = 0; i < et_times.size(); ++i) {
+    std::printf("  idx | SR_fitness (ms) | et_async (ms) | et_batch (ms)\n");
+    float total_sr = 0.0f, total_async = 0.0f, total_batch = 0.0f;
+    for (size_t i = 0; i < et_async_times.size(); ++i) {
         float sr = (i < sr_times.size()) ? sr_times[i] : 0.0f;
-        float et = et_times[i];
-        std::printf("  [%zu] | %14.6f | %18.6f\n", i, sr, et);
-        total_sr += sr;
-        total_et += et;
+        float ea = et_async_times[i];
+        float eb = (i < et_batch_times.size()) ? et_batch_times[i] : 0.0f;
+        std::printf("  [%zu] | %14.6f | %12.6f | %12.6f\n", i, sr, ea, eb);
+        total_sr += sr; total_async += ea; total_batch += eb;
     }
-    std::printf("Overall totals (ms): SR_fitness=%.6f eval_tree_async=%.6f\n", total_sr, total_et);
+    std::printf("Overall totals (ms): SR_fitness=%.6f et_async=%.6f et_batch=%.6f\n", total_sr, total_async, total_batch);
 
     // Cleanup
     cudaFree(d_val); cudaFree(d_type); cudaFree(d_size);
@@ -755,10 +865,12 @@ int main(int argc, char** argv) {
     cudaFree(d_mut_idx);
     cudaFree(d_Xdp);
     cudaFree(d_labels); cudaFree(d_fitness);
-    
+
     return 0;
 }
 
 // Build & Run
-// nvcc -O3 -std=c++17 -arch=sm_80 run_evogp.cu ../evogp/src/evogp/cuda/forward.cu ../evogp/src/evogp/cuda/generate.cu ../evogp/src/evogp/cuda/mutation.cu eval_tree.cu -I ../evogp/src/evogp/cuda -o run_evogp
-// ./run_evogp --pop 512 --points 512 --gens 1 --threads 256 --check 1
+// nvcc -O3 -std=c++17 -arch=sm_80 run_evogp.cu \
+//   ../evogp/src/evogp/cuda/forward.cu ../evogp/src/evogp/cuda/generate.cu ../evogp/src/evogp/cuda/mutation.cu \
+//   eval_tree.cu -I ../evogp/src/evogp/cuda -o run_evogp
+// ./run_evogp --pop 512 --points 512 --gens 1 --threads 256 --check 1 --pad_min_len 8

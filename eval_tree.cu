@@ -25,12 +25,13 @@ __device__ __forceinline__ void async_commit_group() {
 }
 
 template <int N> __device__ __forceinline__ void async_wait_pending() {
+    // waits until there are <= N groups still pending (PTX semantics)
     asm volatile("cp.async.wait_group %0;\n" : : "n"(N));
 }
 
 template<int BYTES>
 __device__ __forceinline__ void cp_async(void* smem_ptr, const void* glob_ptr) {
-  static_assert(BYTES==4 || BYTES==8 || BYTES==16, "cp.async doesn't support more than 16 byte");
+  static_assert(BYTES==4 || BYTES==8 || BYTES==16, "cp.async supports 4/8/16 byte ops");
   uint32_t smem = (uint32_t)__cvta_generic_to_shared(smem_ptr);
   asm volatile("{\n\tcp.async.ca.shared.global [%0], [%1], %2;\n}"
                :: "r"(smem), "l"(glob_ptr), "n"(BYTES));
@@ -454,10 +455,10 @@ __global__ void eval_pop_dp_async_kernel(const int* __restrict__ tokens_all,
       if (dp < dataPoints) {
           const float* src = X + (size_t)dp * (size_t)num_features;
           int f = 0;
+          // Use 16B cp.async when both src/dst are 16B-aligned; otherwise 4B lanes.
           for (; f + 3 < num_features; f += 4) {
               void* sptr = (void*)(&dst[(size_t)tid * (size_t)num_features + f]);
               const void* gptr = (const void*)(&src[f]);
-              // Fast path: single 16B cp.async if both pointers are 16B-aligned.
               if ((((uintptr_t)sptr | (uintptr_t)gptr) & 0xF) == 0) {
                   cp_async4(sptr, gptr);
               } else {
@@ -471,28 +472,36 @@ __global__ void eval_pop_dp_async_kernel(const int* __restrict__ tokens_all,
               cp_async<4>(&dst[(size_t)tid * (size_t)num_features + f], &src[f]);
           }
       } else {
+          // zero-pad when past the end
           for (int f = 0; f < num_features; ++f) {
-              if (tid < tile) dst[(size_t)tid * (size_t)num_features + f] = 0.0f;
+              dst[(size_t)tid * (size_t)num_features + f] = 0.0f;
           }
       }
     };
 
     if (t0 >= dataPoints) return;
 
+    // Stage 0: prefetch first tile into buf0 and wait for completion before consume.
     copy_tile(t0, buf0);
     async_commit_group();
-    async_wait_pending<0>();   // wait for committed groups before consumption
+    async_wait_pending<0>();     // ensure first tile is ready
     __syncthreads();
 
     int t = t0;
     float* cur = buf0;
     float* nxt = buf1;
 
+    // Classic double-buffer pipeline:
+    //   1) issue async copy for "next" tile and commit group
+    //   2) compute on "cur"
+    //   3) wait for the committed group to complete
+    //   4) swap buffers and advance
     while (t < dataPoints) {
         const int next_t = t + stride;
         if (next_t < dataPoints) {
             copy_tile(next_t, nxt);
             async_commit_group();
+            // Allow the group to progress during compute; we'll wait below.
         }
 
         const int dp = t + tid;
@@ -539,6 +548,7 @@ __global__ void eval_pop_dp_async_kernel(const int* __restrict__ tokens_all,
             out[(size_t)tree * (size_t)dataPoints + dp] = (sp > 0) ? s_val[sp - 1] : 0.0f;
         }
 
+        // Ensure the just-committed group (next tile) is complete before swapping.
         async_wait_pending<0>();
         __syncthreads();
         float* tmp = cur; cur = nxt; nxt = tmp;
