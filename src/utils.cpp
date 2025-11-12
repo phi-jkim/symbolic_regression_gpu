@@ -123,71 +123,63 @@ InputInfo parse_input_info(const std::string &input_file)
     if (!file.is_open())
     {
         std::cerr << "Error: Could not open input file: " << input_file << std::endl;
-        info.num_vars = 0;
-        info.num_dps = 0;
-        info.num_tokens = 0;
-        info.tokens = nullptr;
-        info.values = nullptr;
+        info.num_exprs = 0;
         return info;
     }
 
     // Read num_exprs
-    int num_exprs;
-    file >> num_exprs;
-    
-    if (num_exprs != 1)
+    file >> info.num_exprs;
+
+    if (info.num_exprs <= 0)
     {
-        std::cerr << "Error: Currently only single expression files are supported (num_exprs must be 1)" << std::endl;
-        info.num_vars = 0;
-        info.num_dps = 0;
-        info.num_tokens = 0;
-        info.tokens = nullptr;
-        info.values = nullptr;
+        std::cerr << "Error: Invalid num_exprs: " << info.num_exprs << std::endl;
+        info.num_exprs = 0;
         return info;
     }
 
-    // Read num_vars
-    file >> info.num_vars;
+    // Allocate arrays for each expression's metadata
+    info.num_vars = new int[info.num_exprs];
+    info.num_dps = new int[info.num_exprs];
+    info.num_tokens = new int[info.num_exprs];
+    info.tokens = new int *[info.num_exprs];
+    info.values = new double *[info.num_exprs];
+    info.data_filenames = new std::string[info.num_exprs];
 
-    // Read num_dps
-    file >> info.num_dps;
-
-    // Read num_tokens
-    file >> info.num_tokens;
-
-    // Allocate and read tokens
-    info.tokens = new int[info.num_tokens];
-    for (int i = 0; i < info.num_tokens; i++)
+    // Read each expression
+    for (int expr_id = 0; expr_id < info.num_exprs; expr_id++)
     {
-        file >> info.tokens[i];
-    }
+        // Read metadata for this expression
+        file >> info.num_vars[expr_id];
+        file >> info.num_dps[expr_id];
+        file >> info.num_tokens[expr_id];
 
-    // Allocate and read values
-    info.values = new double[info.num_tokens];
-    for (int i = 0; i < info.num_tokens; i++)
-    {
-        file >> info.values[i];
-    }
+        std::cout << "  Expression " << (expr_id + 1) << ": " << info.num_vars[expr_id]
+                  << " vars, " << info.num_dps[expr_id] << " dps, "
+                  << info.num_tokens[expr_id] << " tokens" << std::endl;
 
-    // Read data filename (rest of the line)
-    file.ignore(); // Skip newline
-    std::getline(file, info.data_filename);
+        // Allocate and read tokens
+        info.tokens[expr_id] = new int[info.num_tokens[expr_id]];
+        for (int i = 0; i < info.num_tokens[expr_id]; i++)
+        {
+            file >> info.tokens[expr_id][i];
+        }
+
+        // Allocate and read values
+        info.values[expr_id] = new double[info.num_tokens[expr_id]];
+        for (int i = 0; i < info.num_tokens[expr_id]; i++)
+        {
+            file >> info.values[expr_id][i];
+        }
+
+        // Read data filename
+        file.ignore(); // Skip newline
+        std::getline(file, info.data_filenames[expr_id]);
+    }
 
     file.close();
 
-    // Validate
-    if (info.num_tokens == 0)
-    {
-        std::cerr << "Error: Failed to parse input file" << std::endl;
-        return info;
-    }
-
-    // Print info
     std::cout << "Loaded digest file: " << input_file << std::endl;
-    std::cout << "Data file: " << info.data_filename << std::endl;
-    std::cout << "Num vars: " << info.num_vars << std::endl;
-    std::cout << "Num datapoints: " << info.num_dps << std::endl;
-    std::cout << "Num tokens: " << info.num_tokens << std::endl;
+    std::cout << "Number of expressions: " << info.num_exprs << std::endl;
 
     return info;
 }
@@ -267,10 +259,10 @@ ResultInfo make_result_info(double *pred, double **vars, int num_vars, int num_d
     return result;
 }
 
-void save_results(const std::string &digest_file, const InputInfo &input_info, const ResultInfo &result_info, double **vars)
+void save_results(const std::string &digest_file, const ExpressionInfo &expr_info, const ResultInfo &result_info, double **vars)
 {
-    int num_dps = input_info.num_dps;
-    int num_vars = input_info.num_vars;
+    int num_dps = expr_info.num_dps;
+    int num_vars = expr_info.num_vars;
     double *pred = result_info.pred;
 
     // Create output directory if it doesn't exist
@@ -326,17 +318,264 @@ void free_result_info(ResultInfo &info)
     }
 }
 
+void save_aggregated_results(const std::string &digest_file, const AggregatedResults &results)
+{
+    // Create output directory if it doesn't exist
+    std::string output_dir = "data/output/ai_feyn/raw";
+    mkdir("data", 0755);
+    mkdir("data/output", 0755);
+    mkdir("data/output/ai_feyn", 0755);
+    mkdir(output_dir.c_str(), 0755);
+
+    // Extract filename from digest_file path
+    size_t last_slash = digest_file.find_last_of('/');
+    std::string filename = (last_slash != std::string::npos) ? digest_file.substr(last_slash + 1) : digest_file;
+    size_t dot_pos = filename.find_last_of('.');
+    std::string base_name = (dot_pos != std::string::npos) ? filename.substr(0, dot_pos) : filename;
+
+    // Write aggregated results
+    std::string output_file = output_dir + "/" + base_name + "_output.txt";
+    std::ofstream result_file(output_file, std::ios::out);
+
+    // Write summary statistics
+    result_file << "NumExpressions " << results.num_exprs << "\n";
+    result_file << "TotalTime " << results.total_time_ms << "\n";
+    result_file << "TotalInitTime " << results.total_init_ms << "\n";
+    result_file << "TotalEvalTime " << results.total_eval_ms << "\n";
+    result_file << "AvgMSE " << results.avg_mse << "\n";
+    result_file << "AvgMedian " << results.avg_median << "\n";
+    result_file << "AvgStdDev " << results.avg_stdev << "\n";
+    result_file << "##\n";
+
+    // Write per-expression metrics
+    for (int i = 0; i < results.num_exprs; i++)
+    {
+        result_file << "Expr " << (i + 1)
+                    << " MSE " << results.mse_values[i]
+                    << " Median " << results.median_values[i]
+                    << " StdDev " << results.stdev_values[i]
+                    << " InitTime " << results.init_times[i]
+                    << " EvalTime " << results.eval_times[i]
+                    << "\n";
+    }
+
+    result_file.close();
+
+    // Print summary to console
+    std::cout << "\n" << std::string(60, '=') << std::endl;
+    std::cout << "Aggregated Results (" << results.num_exprs << " expressions)" << std::endl;
+    std::cout << std::string(60, '-') << std::endl;
+    std::cout << "Timing Breakdown:" << std::endl;
+    std::cout << "  Total Time:      " << results.total_time_ms << " ms" << std::endl;
+    std::cout << "  Total Init Time: " << results.total_init_ms << " ms" << std::endl;
+    std::cout << "  Total Eval Time: " << results.total_eval_ms << " ms" << std::endl;
+    std::cout << std::string(60, '-') << std::endl;
+    std::cout << "Accuracy Metrics (Average):" << std::endl;
+    std::cout << "  MSE:    " << results.avg_mse << std::endl;
+    std::cout << "  Median: " << results.avg_median << std::endl;
+    std::cout << "  StdDev: " << results.avg_stdev << std::endl;
+    std::cout << std::string(60, '-') << std::endl;
+    std::cout << "Results written to: " << output_file << std::endl;
+    std::cout << std::string(60, '=') << std::endl;
+}
+
+void free_aggregated_results(AggregatedResults &results)
+{
+    if (results.num_exprs > 0)
+    {
+        delete[] results.mse_values;
+        delete[] results.median_values;
+        delete[] results.stdev_values;
+        delete[] results.init_times;
+        delete[] results.eval_times;
+        results.num_exprs = 0;
+    }
+}
+
+void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_info,
+                               double (*eval_func)(int *, double *, double *, int, int),
+                               TimePoint start_time)
+{
+    // Special case: single expression with detailed output
+    if (input_info.num_exprs == 1)
+    {
+        int expr_id = 0;
+        int num_vars = input_info.num_vars[expr_id];
+        int num_dps = input_info.num_dps[expr_id];
+        int num_tokens = input_info.num_tokens[expr_id];
+        int *tokens = input_info.tokens[expr_id];
+        double *values = input_info.values[expr_id];
+        std::string data_filename = input_info.data_filenames[expr_id];
+
+        // Load data
+        TimePoint load_start = measure_clock();
+        double **vars = load_data_file(data_filename, num_vars, num_dps);
+        double load_time_ms = clock_to_ms(load_start, measure_clock());
+
+        // Evaluate
+        TimePoint eval_start = measure_clock();
+        double *pred = (double *)malloc(num_dps * sizeof(double));
+        for (int dp = 0; dp < num_dps; dp++)
+        {
+            double *x = (double *)malloc((num_vars + 1) * sizeof(double));
+            for (int i = 0; i <= num_vars; i++)
+                x[i] = vars[i][dp];
+            double y = eval_func(tokens, values, x, num_tokens, num_vars);
+            pred[dp] = y;
+            free(x);
+        }
+        double eval_time_ms = clock_to_ms(eval_start, measure_clock());
+
+        // Format and calculate statistics
+        TimePoint output_start = measure_clock();
+        std::cout << "\nFormula: " << format_formula(tokens, values, num_tokens) << std::endl;
+
+        ResultInfo result_info = make_result_info(pred, vars, num_vars, num_dps,
+                                                  load_time_ms, eval_time_ms, 0.0);
+        result_info.output_time_ms = clock_to_ms(output_start, measure_clock());
+
+        // Create output filename
+        size_t last_slash = digest_file.find_last_of('/');
+        std::string filename = (last_slash != std::string::npos) ? digest_file.substr(last_slash + 1) : digest_file;
+        size_t dot_pos = filename.find_last_of('.');
+        std::string base_name = (dot_pos != std::string::npos) ? filename.substr(0, dot_pos) : filename;
+        std::string output_name = base_name + "_expr_001.txt";
+
+        ExpressionInfo expr_info;
+        expr_info.num_vars = num_vars;
+        expr_info.num_dps = num_dps;
+        expr_info.num_tokens = num_tokens;
+        expr_info.tokens = tokens;
+        expr_info.values = values;
+        expr_info.data_filename = data_filename;
+
+        save_results(output_name, expr_info, result_info, vars);
+
+        // Clean up
+        free_result_info(result_info);
+        free_data(vars, num_vars);
+        return;
+    }
+
+    // Multi-expression case: aggregated results
+    AggregatedResults agg_results;
+    agg_results.num_exprs = input_info.num_exprs;
+    agg_results.mse_values = new double[agg_results.num_exprs];
+    agg_results.median_values = new double[agg_results.num_exprs];
+    agg_results.stdev_values = new double[agg_results.num_exprs];
+    agg_results.init_times = new double[agg_results.num_exprs];
+    agg_results.eval_times = new double[agg_results.num_exprs];
+
+    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
+    {
+        int num_vars = input_info.num_vars[expr_id];
+        int num_dps = input_info.num_dps[expr_id];
+        int num_tokens = input_info.num_tokens[expr_id];
+        int *tokens = input_info.tokens[expr_id];
+        double *values = input_info.values[expr_id];
+        std::string data_filename = input_info.data_filenames[expr_id];
+
+        // Load data
+        TimePoint load_start = measure_clock();
+        double **vars = load_data_file(data_filename, num_vars, num_dps);
+        double load_time_ms = clock_to_ms(load_start, measure_clock());
+
+        // Evaluate
+        TimePoint eval_start = measure_clock();
+        double *pred = (double *)malloc(num_dps * sizeof(double));
+        for (int dp = 0; dp < num_dps; dp++)
+        {
+            double *x = (double *)malloc((num_vars + 1) * sizeof(double));
+            for (int i = 0; i <= num_vars; i++)
+                x[i] = vars[i][dp];
+            double y = eval_func(tokens, values, x, num_tokens, num_vars);
+            pred[dp] = y;
+            free(x);
+        }
+        double eval_time_ms = clock_to_ms(eval_start, measure_clock());
+
+        // Calculate statistics
+        ResultInfo result_info = make_result_info(pred, vars, num_vars, num_dps,
+                                                  load_time_ms, eval_time_ms, 0.0);
+
+        // Store in aggregated results
+        agg_results.mse_values[expr_id] = result_info.mse;
+        agg_results.median_values[expr_id] = result_info.median;
+        agg_results.stdev_values[expr_id] = result_info.stdev;
+        agg_results.init_times[expr_id] = load_time_ms;
+        agg_results.eval_times[expr_id] = eval_time_ms;
+
+        // Clean up
+        free_result_info(result_info);
+        free_data(vars, num_vars);
+    }
+
+    // Calculate totals and averages (skip NaN/inf values)
+    agg_results.total_time_ms = clock_to_ms(start_time, measure_clock());
+    agg_results.total_init_ms = 0.0;
+    agg_results.total_eval_ms = 0.0;
+    agg_results.avg_mse = 0.0;
+    agg_results.avg_median = 0.0;
+    agg_results.avg_stdev = 0.0;
+    int valid_count = 0;
+    
+    for (int i = 0; i < agg_results.num_exprs; i++)
+    {
+        // Sum timing values
+        agg_results.total_init_ms += agg_results.init_times[i];
+        agg_results.total_eval_ms += agg_results.eval_times[i];
+        
+        // Average metrics (skip NaN/inf)
+        if (std::isfinite(agg_results.mse_values[i]) &&
+            std::isfinite(agg_results.median_values[i]) &&
+            std::isfinite(agg_results.stdev_values[i]))
+        {
+            agg_results.avg_mse += agg_results.mse_values[i];
+            agg_results.avg_median += agg_results.median_values[i];
+            agg_results.avg_stdev += agg_results.stdev_values[i];
+            valid_count++;
+        }
+    }
+    if (valid_count > 0)
+    {
+        agg_results.avg_mse /= valid_count;
+        agg_results.avg_median /= valid_count;
+        agg_results.avg_stdev /= valid_count;
+    }
+
+    // Save aggregated results
+    save_aggregated_results(digest_file, agg_results);
+
+    // Clean up
+    free_aggregated_results(agg_results);
+}
+
 void free_input_info(InputInfo &info)
 {
-    if (info.tokens != nullptr)
+    if (info.num_exprs > 0)
     {
+        // Free each expression's data
+        for (int i = 0; i < info.num_exprs; i++)
+        {
+            if (info.tokens[i] != nullptr)
+            {
+                delete[] info.tokens[i];
+            }
+            if (info.values[i] != nullptr)
+            {
+                delete[] info.values[i];
+            }
+        }
+
+        // Free arrays
+        delete[] info.num_vars;
+        delete[] info.num_dps;
+        delete[] info.num_tokens;
         delete[] info.tokens;
-        info.tokens = nullptr;
-    }
-    if (info.values != nullptr)
-    {
         delete[] info.values;
-        info.values = nullptr;
+        delete[] info.data_filenames;
+
+        info.num_exprs = 0;
     }
 }
 

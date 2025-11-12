@@ -61,8 +61,16 @@ $(CPU_EVAL_BIN): $(UTILS_SRC) $(EVAL_SRC)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -o $@ $(UTILS_SRC) $(EVAL_SRC)
 
-run_cpu_eval: $(CPU_EVAL_BIN)
+# Test with single expression
+run_cpu_eval_single: $(CPU_EVAL_BIN)
 	$(CPU_EVAL_BIN) data/ai_feyn/singles/input_001.txt
+
+# Test with multiple expressions
+run_cpu_eval_multi: $(CPU_EVAL_BIN)
+	$(CPU_EVAL_BIN) data/ai_feyn/multi/input_100_10k.txt
+
+# Default run target (single expression)
+run_cpu_eval: run_cpu_eval_single
 
 # ============================================================================
 

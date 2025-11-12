@@ -1,7 +1,6 @@
 #include <iostream>
 #include <string>
 #include <cmath>
-#include <fstream>
 #include "../utils.h"
 
 double eval_op(int op, double val1, double val2)
@@ -126,62 +125,20 @@ int main(int argc, char **argv)
 
     std::string digest_file = argv[1];
 
-    // Parse input digest file (validates and prints info)
+    // Parse input file (handles both single and multiple expressions)
     InputInfo input_info = parse_input_info(digest_file);
 
-    if (input_info.num_tokens == 0)
+    if (input_info.num_exprs == 0)
     {
-        std::cerr << "Error: Failed to parse input file - (num_tokens == 0)" << std::endl;
+        std::cerr << "Error: Failed to parse input file" << std::endl;
         return 1;
     }
 
-    int num_vars = input_info.num_vars;
-    int num_dps = input_info.num_dps;
-
-    // Load data from file
-    double **vars = load_data_file(input_info.data_filename, num_vars, num_dps);
-    // Use tokens and values from digest file
-    int num_tokens = input_info.num_tokens;
-    int *tokens = input_info.tokens;
-    double *values = input_info.values;
-
-    double *pred = (double *)malloc(num_dps * sizeof(double));
-
-    double init_time_ms = clock_to_ms(main_start, measure_clock());
-
-    // Run the single tree evaluation (with timing)
-    TimePoint eval_start = measure_clock();
-
-    for (int dp = 0; dp < num_dps; dp++)
-    {
-        double *x = (double *)malloc((num_vars + 1) * sizeof(double));
-        for (int i = 0; i <= num_vars; i++)
-            x[i] = vars[i][dp];
-
-        double y = eval_tree_cpu(tokens, values, x, num_tokens, num_vars);
-        pred[dp] = y;
-    }
-
-    double eval_time_ms = clock_to_ms(eval_start, measure_clock());
-
-    // Format and calculate statistics (with timing)
-    TimePoint output_start = measure_clock();
-
-    std::cout << "\nFormula: " << format_formula(tokens, values, num_tokens) << std::endl;
-
-    // Calculate statistics
-    ResultInfo result_info = make_result_info(pred, vars, num_vars, num_dps,
-                                              init_time_ms, eval_time_ms, 0.0);
-
-    result_info.output_time_ms = clock_to_ms(output_start, measure_clock());
-
-    // Save results to file
-    save_results(digest_file, input_info, result_info, vars);
+    // Evaluate and save results (handles both single and multi-expression)
+    evaluate_and_save_results(digest_file, input_info, eval_tree_cpu, main_start);
 
     // Clean up
-    free_result_info(result_info);
     free_input_info(input_info);
-    free_data(vars, num_vars);
 
     return 0;
 }

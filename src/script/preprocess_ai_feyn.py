@@ -314,7 +314,7 @@ def create_multi_expression_file(
     """
     Create a multi-expression input file with all formulas from the CSV.
     Each formula will use the specified num_dps.
-    
+
     Args:
         digest_csv_filename: Path to the CSV file with formulas
         output_path: Path to write the multi-expression file
@@ -323,71 +323,79 @@ def create_multi_expression_file(
     # Read CSV file
     df = pd.read_csv(digest_csv_filename)
     df = df[df["Filename"].notna()]  # Filter out rows with missing filenames
-    
+
     # Create output directory if needed
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
+
     successful_exprs = []
-    
+
     # Process each formula
     for i, row in df.iterrows():
         formula_str = row["Formula"]
-        var_names_str = row["Output"]
         data_filename = row["Filename"]
-        num_vars = int(row["# variables"])
-        
+        num_vars_input = int(row["# variables"])  # Input variables only
+        num_vars = num_vars_input + 1  # +1 for output variable
+
         try:
-            # Parse and tokenize formula
-            expr = parse_expr(formula_str, transformations="all")
-            var_names = [v.strip() for v in var_names_str.split(",")]
-            
-            # Binarize and tokenize
-            binary_expr = binarize_tree(expr)
+            # Construct variable names properly (same as main())
+            var_names = [
+                row[f"v{i+1}_name"] for i in range(num_vars - 1) if row[f"v{i+1}_name"]
+            ] + [row["Output"]]
+
+            # Parse and binarize the formula (same as main())
+            binary_expr = parse_and_binarize(formula_str, var_names)
+
+            if binary_expr is None:
+                raise Exception(f"Failed to parse formula")
+
+            # Convert to tokens
             tokens, token_values = expr_to_tokens(binary_expr, var_names)
-            
+
             # Reconstruct to verify
             reconstructed, _ = tokens_to_string(tokens, token_values, var_names)
-            
-            successful_exprs.append({
-                "num_vars": num_vars,
-                "num_dps": num_dps,
-                "tokens": tokens,
-                "values": token_values,
-                "data_filename": data_filename,
-                "original_formula": formula_str,
-                "reconstructed_formula": reconstructed
-            })
-            
+
+            successful_exprs.append(
+                {
+                    "num_vars": num_vars_input,  # Store input vars only (like in singles)
+                    "num_dps": num_dps,
+                    "tokens": tokens,
+                    "values": token_values,
+                    "data_filename": data_filename,
+                    "original_formula": formula_str,
+                    "reconstructed_formula": reconstructed,
+                }
+            )
+
         except Exception as e:
             print(f"Warning: Skipping formula {i+1} due to error: {e}")
             continue
-    
+
     # Write multi-expression file
     with open(output_path, "w") as f:
         # Write num_exprs
         f.write(f"{len(successful_exprs)}\n")
-        
+
         # Write each expression
         for expr_data in successful_exprs:
             f.write(f"{expr_data['num_vars']}\n")
             f.write(f"{expr_data['num_dps']}\n")
             f.write(f"{len(expr_data['tokens'])}\n")
-            
+
             # Write tokens
-            tokens_str = " ".join(str(t) for t in expr_data['tokens'])
+            tokens_str = " ".join(str(t) for t in expr_data["tokens"])
             f.write(f"{tokens_str}\n")
-            
+
             # Write values
-            values_str = " ".join(f"{v:.15g}" for v in expr_data['values'])
+            values_str = " ".join(f"{v:.15g}" for v in expr_data["values"])
             f.write(f"{values_str}\n")
-            
+
             # Write data filename
             f.write(f"data/ai_feyn/Feynman_with_units/{expr_data['data_filename']}\n")
-            
-            # Write formulas for debugging
-            f.write(f"{expr_data['original_formula']}\n")
-            f.write(f"{expr_data['reconstructed_formula']}\n")
-    
+
+            # # Write formulas for debugging
+            # f.write(f"{expr_data['original_formula']}\n")
+            # f.write(f"{expr_data['reconstructed_formula']}\n")
+
     print(f"Created multi-expression file: {output_path}")
     print(f"Total expressions: {len(successful_exprs)}")
     print(f"Data points per expression: {num_dps}")
@@ -526,17 +534,28 @@ if __name__ == "__main__":
     import sys
 
     digest_csv_filename = "data/ai_feyn/FeynmanEquations.csv"
-    
+
     # Check if we should create multi-expression file
     if "--multi" in sys.argv or "-m" in sys.argv:
-        output_path = "data/ai_feyn/multi/input_100_10k.txt"
         num_dps = 10000
-        
-        # Allow custom num_dps
+        output_path = None
+
+        # Allow custom num_dps and output path
         for arg in sys.argv:
             if arg.startswith("--dps="):
                 num_dps = int(arg.split("=")[1])
-        
+            elif arg.startswith("--output="):
+                output_path = arg.split("=", 1)[1]
+
+        # Auto-generate output path if not specified
+        if output_path is None:
+            # Format: input_100_10k.txt or input_100_100k.txt
+            if num_dps >= 1000:
+                dps_str = f"{num_dps // 1000}k"
+            else:
+                dps_str = str(num_dps)
+            output_path = f"data/ai_feyn/multi/input_100_{dps_str}.txt"
+
         create_multi_expression_file(digest_csv_filename, output_path, num_dps)
     else:
         # Original single-expression mode
