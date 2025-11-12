@@ -1,6 +1,7 @@
 # read csv, write to ai_feyn/digest/input_001.txt (in toml)
 # File format:
 """
+1           # num_exprs
 2           # num_vars
 1000000     # num_dps
 12          # num_tokens (for formula)
@@ -99,6 +100,8 @@ def expr_to_tokens(expr, var_names: List[str]) -> Tuple[List[int], List[float]]:
     values = []
 
     # Operator mappings
+    # Binary operators: 1-9
+    # Unary operators: 10-27
     func_op_map = {
         "sin": 10,
         "cos": 11,
@@ -114,6 +117,9 @@ def expr_to_tokens(expr, var_names: List[str]) -> Tuple[List[int], List[float]]:
         "arcsin": 19,  # Alias for asin
         "arccos": 20,  # Alias for acos
         "arctan": 21,  # Alias for atan
+        "sqrt": 26,
+        "abs": 24,
+        "Abs": 24,
     }
 
     for node in preorder_traversal(expr):
@@ -151,6 +157,14 @@ def expr_to_tokens(expr, var_names: List[str]) -> Tuple[List[int], List[float]]:
         elif node.is_Pow:
             # POW operation
             tokens.append(5)
+            values.append(0.0)
+        elif hasattr(node, "func") and node.func.__name__ == "Min":
+            # MIN operation
+            tokens.append(6)
+            values.append(0.0)
+        elif hasattr(node, "func") and node.func.__name__ == "Max":
+            # MAX operation
+            tokens.append(7)
             values.append(0.0)
         else:
             print(
@@ -191,7 +205,12 @@ def tokens_to_string(
         19: "asin",
         20: "acos",
         21: "atan",
-        25: "neg",
+        22: "loose_log",
+        23: "loose_inv",
+        24: "abs",
+        25: "-",
+        26: "sqrt",
+        27: "loose_sqrt",
     }
 
     binary_ops = {
@@ -200,6 +219,10 @@ def tokens_to_string(
         3: "*",
         4: "/",
         5: "**",
+        6: "min",
+        7: "max",
+        8: "loose_div",
+        9: "loose_pow",
     }
 
     # Process from right to left for prefix notation
@@ -263,25 +286,111 @@ def write_digest_file(
     """
     Write a digest file in the required format.
     """
-    with open(output_path, 'w') as f:
+    with open(output_path, "w") as f:
+        f.write("1\n")
         f.write(f"{num_vars}\n")
         f.write(f"{num_dps}\n")
         f.write(f"{len(tokens)}\n")
-        
+
         # Write tokens (space-separated integers)
-        tokens_str = ' '.join(str(t) for t in tokens)
+        tokens_str = " ".join(str(t) for t in tokens)
         f.write(f"{tokens_str}\n")
-        
+
         # Write values (space-separated floats with double precision)
-        values_str = ' '.join(f"{v:.15g}" for v in values)
+        values_str = " ".join(f"{v:.15g}" for v in values)
         f.write(f"{values_str}\n")
-        
+
         # Write data filename
         f.write(f"data/ai_feyn/Feynman_with_units/{data_filename}\n")
-        
+
         # Write original and reconstructed formulas for debugging
         f.write(f"{original_formula}\n")
         f.write(f"{reconstructed_formula}\n")
+
+
+def create_multi_expression_file(
+    digest_csv_filename: str, output_path: str, num_dps: int = 10000
+) -> None:
+    """
+    Create a multi-expression input file with all formulas from the CSV.
+    Each formula will use the specified num_dps.
+    
+    Args:
+        digest_csv_filename: Path to the CSV file with formulas
+        output_path: Path to write the multi-expression file
+        num_dps: Number of data points per expression (default: 10000)
+    """
+    # Read CSV file
+    df = pd.read_csv(digest_csv_filename)
+    df = df[df["Filename"].notna()]  # Filter out rows with missing filenames
+    
+    # Create output directory if needed
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    successful_exprs = []
+    
+    # Process each formula
+    for i, row in df.iterrows():
+        formula_str = row["Formula"]
+        var_names_str = row["Output"]
+        data_filename = row["Filename"]
+        num_vars = int(row["# variables"])
+        
+        try:
+            # Parse and tokenize formula
+            expr = parse_expr(formula_str, transformations="all")
+            var_names = [v.strip() for v in var_names_str.split(",")]
+            
+            # Binarize and tokenize
+            binary_expr = binarize_tree(expr)
+            tokens, token_values = expr_to_tokens(binary_expr, var_names)
+            
+            # Reconstruct to verify
+            reconstructed, _ = tokens_to_string(tokens, token_values, var_names)
+            
+            successful_exprs.append({
+                "num_vars": num_vars,
+                "num_dps": num_dps,
+                "tokens": tokens,
+                "values": token_values,
+                "data_filename": data_filename,
+                "original_formula": formula_str,
+                "reconstructed_formula": reconstructed
+            })
+            
+        except Exception as e:
+            print(f"Warning: Skipping formula {i+1} due to error: {e}")
+            continue
+    
+    # Write multi-expression file
+    with open(output_path, "w") as f:
+        # Write num_exprs
+        f.write(f"{len(successful_exprs)}\n")
+        
+        # Write each expression
+        for expr_data in successful_exprs:
+            f.write(f"{expr_data['num_vars']}\n")
+            f.write(f"{expr_data['num_dps']}\n")
+            f.write(f"{len(expr_data['tokens'])}\n")
+            
+            # Write tokens
+            tokens_str = " ".join(str(t) for t in expr_data['tokens'])
+            f.write(f"{tokens_str}\n")
+            
+            # Write values
+            values_str = " ".join(f"{v:.15g}" for v in expr_data['values'])
+            f.write(f"{values_str}\n")
+            
+            # Write data filename
+            f.write(f"data/ai_feyn/Feynman_with_units/{expr_data['data_filename']}\n")
+            
+            # Write formulas for debugging
+            f.write(f"{expr_data['original_formula']}\n")
+            f.write(f"{expr_data['reconstructed_formula']}\n")
+    
+    print(f"Created multi-expression file: {output_path}")
+    print(f"Total expressions: {len(successful_exprs)}")
+    print(f"Data points per expression: {num_dps}")
 
 
 def main(
@@ -292,7 +401,7 @@ def main(
     df = df[df["Filename"].notna()]  # Filter out rows with missing filenames
 
     # Create output directory if writing output
-    output_dir = "data/ai_feyn/digest"
+    output_dir = "data/ai_feyn/singles"
     if write_output:
         os.makedirs(output_dir, exist_ok=True)
         if not quiet:
@@ -417,7 +526,21 @@ if __name__ == "__main__":
     import sys
 
     digest_csv_filename = "data/ai_feyn/FeynmanEquations.csv"
-    quiet = "--quiet" in sys.argv or "-q" in sys.argv
-    write_output = "--write" in sys.argv or "-w" in sys.argv
+    
+    # Check if we should create multi-expression file
+    if "--multi" in sys.argv or "-m" in sys.argv:
+        output_path = "data/ai_feyn/multi/input_100_10k.txt"
+        num_dps = 10000
+        
+        # Allow custom num_dps
+        for arg in sys.argv:
+            if arg.startswith("--dps="):
+                num_dps = int(arg.split("=")[1])
+        
+        create_multi_expression_file(digest_csv_filename, output_path, num_dps)
+    else:
+        # Original single-expression mode
+        quiet = "--quiet" in sys.argv or "-q" in sys.argv
+        write_output = "--write" in sys.argv or "-w" in sys.argv
 
-    main(digest_csv_filename, quiet=quiet, write_output=write_output)
+        main(digest_csv_filename, quiet=quiet, write_output=write_output)

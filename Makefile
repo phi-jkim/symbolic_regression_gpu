@@ -46,5 +46,26 @@ run_test: test
 
 run_bench: bench
 
+# ============================================================================
+# CPU Evaluation Targets (for Feynman equation evaluation)
+# ============================================================================
+CXX = g++
+CXXFLAGS = -std=c++11 -O3 -Wall
+
+BUILD_DIR = build
+CPU_EVAL_BIN = $(BUILD_DIR)/cpu_eval
+UTILS_SRC = src/utils.cpp
+EVAL_SRC = src/eval/single_cpu_simple.cpp
+
+$(CPU_EVAL_BIN): $(UTILS_SRC) $(EVAL_SRC)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(UTILS_SRC) $(EVAL_SRC)
+
+run_cpu_eval: $(CPU_EVAL_BIN)
+	$(CPU_EVAL_BIN) data/ai_feyn/singles/input_001.txt
+
+# ============================================================================
+
 clean:
 	rm -f $(TARGET) run_gpu $(TEST_BIN) $(BENCH_BIN)
+	rm -rf $(BUILD_DIR)
