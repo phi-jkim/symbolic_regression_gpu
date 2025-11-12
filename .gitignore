@@ -5,3 +5,5 @@ data/*
 .vscode/
 .venv/
 
+build/
+sandbox.ipynb
