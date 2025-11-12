@@ -9,6 +9,8 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <sys/stat.h>
+#include <sys/types.h>
 std::uniform_real_distribution<double> unif(0, 10);
 unsigned seed = std::chrono::steady_clock::now().time_since_epoch().count();
 std::default_random_engine re(seed);
@@ -37,6 +39,7 @@ std::string format_formula(int *tokens, double *values, int num_tokens)
         case 2: // SUB
         case 3: // MUL
         case 4: // DIV
+        case 5: // POW
             if (stack.size() < 2)
                 return "INVALID";
             {
@@ -46,22 +49,42 @@ std::string format_formula(int *tokens, double *values, int num_tokens)
                 stack.pop_back();
                 const char *op = (token == 1) ? " + " : (token == 2) ? " - "
                                                     : (token == 3)   ? " * "
-                                                                     : " / ";
+                                                    : (token == 4)   ? " / "
+                                                                     : " ** ";
                 stack.push_back("(" + a + op + b + ")");
             }
             break;
-        case 5: // SIN
-        case 6: // COS
-        case 7: // EXP
-        case 8: // LOG
+        case 10: // SIN
+        case 11: // COS
+        case 12: // TAN
+        case 13: // SINH
+        case 14: // COSH
+        case 15: // TANH
+        case 16: // EXP
+        case 17: // LOG
+        case 18: // INV
+        case 19: // ASIN
+        case 20: // ACOS
+        case 21: // ATAN
+        case 25: // NEG
             if (stack.empty())
                 return "INVALID";
             {
                 std::string a = stack.back();
                 stack.pop_back();
-                const char *func = (token == 5) ? "sin" : (token == 6) ? "cos"
-                                                      : (token == 7)   ? "exp"
-                                                                       : "log";
+                const char *func = (token == 10) ? "sin" : (token == 11) ? "cos"
+                                                       : (token == 12)   ? "tan"
+                                                       : (token == 13)   ? "sinh"
+                                                       : (token == 14)   ? "cosh"
+                                                       : (token == 15)   ? "tanh"
+                                                       : (token == 16)   ? "exp"
+                                                       : (token == 17)   ? "log"
+                                                       : (token == 18)   ? "inv"
+                                                       : (token == 19)   ? "asin"
+                                                       : (token == 20)   ? "acos"
+                                                       : (token == 21)   ? "atan"
+                                                       : (token == 25)   ? "-"
+                                                                         : "?";
                 stack.push_back(std::string(func) + "(" + a + ")");
             }
             break;
@@ -84,12 +107,61 @@ std::string format_formula(int *tokens, double *values, int num_tokens)
 }
 typedef struct
 {
-
+    int num_vars;
+    int num_dps;
+    int num_tokens;
+    int *tokens;
+    double *values;
+    std::string data_filename;
 } InputInfo;
 
-// InputInfo parse_input_info(std::string input_file)
-// {
-// }
+InputInfo parse_input_info(std::string input_file)
+{
+    InputInfo info;
+    std::ifstream file(input_file);
+
+    if (!file.is_open())
+    {
+        std::cerr << "Error: Could not open input file: " << input_file << std::endl;
+        info.num_vars = 0;
+        info.num_dps = 0;
+        info.num_tokens = 0;
+        info.tokens = nullptr;
+        info.values = nullptr;
+        return info;
+    }
+
+    // Read num_vars
+    file >> info.num_vars;
+
+    // Read num_dps
+    file >> info.num_dps;
+
+    // Read num_tokens
+    file >> info.num_tokens;
+
+    // Allocate and read tokens
+    info.tokens = new int[info.num_tokens];
+    for (int i = 0; i < info.num_tokens; i++)
+    {
+        file >> info.tokens[i];
+    }
+
+    // Allocate and read values
+    info.values = new double[info.num_tokens];
+    for (int i = 0; i < info.num_tokens; i++)
+    {
+        file >> info.values[i];
+    }
+
+    // Read data filename (rest of the line)
+    file.ignore(); // Skip newline
+    std::getline(file, info.data_filename);
+
+    file.close();
+
+    return info;
+}
 
 double eval_op(int op, double val1, double val2)
 {
@@ -104,13 +176,33 @@ double eval_op(int op, double val1, double val2)
     case 4:
         return val1 / val2;
     case 5:
+        return pow(val1, val2);
+    case 10:
         return sin(val1);
-    case 6:
+    case 11:
         return cos(val1);
-    case 7:
+    case 12:
+        return tan(val1);
+    case 13:
+        return sinh(val1);
+    case 14:
+        return cosh(val1);
+    case 15:
+        return tanh(val1);
+    case 16:
         return exp(val1);
-    case 8:
+    case 17:
         return log(val1);
+    case 18:
+        return 1.0 / val1; // INV
+    case 19:
+        return asin(val1); // ASIN
+    case 20:
+        return acos(val1); // ACOS
+    case 21:
+        return atan(val1); // ATAN
+    case 25:
+        return -val1; // NEG
     default:
         return 0;
     }
@@ -128,7 +220,7 @@ double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int
         if (tok > 0) // operation
         {
             val1 = stk[sp - 1], sp--;
-            if (tok <= 4)
+            if (tok < 10) // binary operation
                 val2 = stk[sp - 1], sp--;
 
             tmp = eval_op(tok, val1, val2);
@@ -153,128 +245,105 @@ double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int
 
 int main(int argc, char **argv)
 {
-    if (argc != 3)
+    if (argc != 2)
     {
-        std::cerr << "Usage: " << argv[0] << " <input_file> <output_file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <digest_file>" << std::endl;
         return 1;
     }
 
-    std::string input_file = argv[1];
-    std::string output_file = argv[2];
+    std::string digest_file = argv[1];
 
-    // @here time input parsing
-    // InputInfo input_info = parse_input_info(input_file);
+    // Parse input digest file
+    InputInfo input_info = parse_input_info(digest_file);
 
-    // load any files from input info
+    if (input_info.num_tokens == 0)
+    {
+        std::cerr << "Error: Failed to parse input file" << std::endl;
+        return 1;
+    }
 
-    int num_vars;
-    int num_dps;
+    std::cout << "Loaded digest file: " << digest_file << std::endl;
+    std::cout << "Data file: " << input_info.data_filename << std::endl;
+    std::cout << "Num vars: " << input_info.num_vars << std::endl;
+    std::cout << "Num datapoints: " << input_info.num_dps << std::endl;
+    std::cout << "Num tokens: " << input_info.num_tokens << std::endl;
+
+    int num_vars = input_info.num_vars;
+    int num_dps = input_info.num_dps;
     double **vars;
     // vars[i][j] means for variable x_i, its value in jth datapoint is vars[i][j].
     // i.e. i has small dim(=num_var < 10), j has large dim(=num_dps ~= 1M).
 
-    // test with placeholder for x4 = 0.1 x1^2 + 4 x1 * x3 + sin(x2 * x3 + 3)
-    num_vars = 4;
-    num_dps = 1000;
-    vars = (double **)malloc(num_vars * sizeof(double *));
-    for (int i = 0; i < num_vars; i++)
+    vars = (double **)malloc((num_vars + 1) * sizeof(double *));
+    for (int i = 0; i <= num_vars; i++)
     {
         vars[i] = (double *)malloc(num_dps * sizeof(double));
     }
 
+    std::ifstream feyn_data_file(input_info.data_filename);
+
     for (int j = 0; j < num_dps; j++)
     {
-        // x1, x2, x3: random 0~10
-
-        vars[0][j] = unif(re);
-        vars[1][j] = unif(re);
-        vars[2][j] = unif(re);
-        vars[3][j] = 0.1 * vars[0][j] * vars[0][j] + 0.3 * vars[0][j] * vars[2][j] + 5 * sin(vars[1][j] * vars[2][j] + 3);
+        for (int i = 0; i <= num_vars; i++)
+            feyn_data_file >> vars[i][j];
     }
-
-    // write test text output boilerplate
-    std::ofstream test_file("test.txt", std::ios::out);
-    test_file << num_vars << " " << num_dps << "\n";
-    for (int i = 0; i < num_vars; i++)
-    {
-        for (int j = 0; j < num_dps; j++)
-        {
-            test_file << vars[i][j] << " ";
-        }
-        test_file << "\n";
-    }
-
-    // types: 1 ~ P is operators (add, sin, etc)
-    //        0 means constant
-    //        -1 means variables
-    // prefix notation of a formula +(OP1, OP2), ...
-    // 1 = ADD, 2 = SUB, 3 = MUL, 4 = DIV, 5 = SIN, 6 = COS, 7 = EXP, 8 = LOG
-    int num_tokens;
-    int *tokens;
-    double *values;
-
-    /*
-    ADD(
-      ADD(
-        MUL(0.1, MUL(VAR(0), VAR(0))), // 3, 0, 3, -1, -1 | 0, 0.1, 0, 0, 0
-        MUL(0.3, MUL(VAR(0), VAR(2)))  // 3, 0, 3, -1, -1 | 0, 0.3, 0, 0, 2
-        ),
-      MUL(5, SIN(ADD(MUL(VAR(1), VAR(2)), 3))) // 3, 0, 5, 1, 3, -1, -1, 0 | 0, 5, 0, 0, 0, 1, 2, 3
-    )
-    */
-    int tmp_tokens[] = {
-        1,
-        1, // ADD(ADD(
-        3, // MUL (
-        0,
-        3,
-        -1,
-        -1, // ),
-        3,  // MUL (
-        0,
-        3,
-        -1,
-        -1, // ) )
-        3,  // MUL (
-        0,
-        5,
-        1,
-        3,
-        -1,
-        -1,
-        0, // ) )
-    };
-    double tmp_values[] = {
-        0, 0, 0, 0.1, 0, 0, 0, 0, 0.3, 0, 0, 2, 0, 5, 0, 0, 0, 1, 2, 3};
-
-    num_tokens = sizeof(tmp_tokens) / sizeof(tmp_tokens[0]);
-    tokens = tmp_tokens;
-    values = tmp_values;
+    // Use tokens and values from digest file
+    int num_tokens = input_info.num_tokens;
+    int *tokens = input_info.tokens;
+    double *values = input_info.values;
 
     double *pred = (double *)malloc(num_dps * sizeof(double));
 
     // run the single tree evaluation (with timing)
     for (int dp = 0; dp < num_dps; dp++)
     {
-        double *x = (double *)malloc(num_vars * sizeof(double));
-        for (int i = 0; i < num_vars; i++)
+        double *x = (double *)malloc((num_vars + 1) * sizeof(double));
+        for (int i = 0; i <= num_vars; i++)
             x[i] = vars[i][dp];
 
         double y = eval_tree_cpu(tokens, values, x, num_tokens, num_vars);
         pred[dp] = y;
     }
 
-    std::cout << "num_tokens: " << num_tokens << std::endl;
-    std::cout << format_formula(tokens, values, num_tokens) << std::endl;
+    std::cout << "\nFormula: " << format_formula(tokens, values, num_tokens) << std::endl;
+
+    // Create output directory if it doesn't exist
+    std::string output_dir = "data/output/ai_feyn";
+    mkdir("data", 0755);
+    mkdir("data/output", 0755);
+    mkdir(output_dir.c_str(), 0755);
+
+    // Extract filename from digest_file path
+    size_t last_slash = digest_file.find_last_of('/');
+    std::string filename = (last_slash != std::string::npos) ? digest_file.substr(last_slash + 1) : digest_file;
+    size_t dot_pos = filename.find_last_of('.');
+    std::string base_name = (dot_pos != std::string::npos) ? filename.substr(0, dot_pos) : filename;
 
     // write the output info to output file
-    std::ofstream result_file("output.txt", std::ios::out);
+    std::string output_file = output_dir + "/" + base_name + "_output.txt";
+    std::ofstream result_file(output_file, std::ios::out);
     result_file << num_dps << "\n";
     for (int i = 0; i < num_dps; i++)
     {
-        result_file << pred[i] << "\n";
+        // std::cout << "dp: " << i << ", pred: " << pred[i] << std::endl;
+        double diff = abs(pred[i] - vars[num_vars][i]);
+        if (diff > 1e-10)
+            std::cerr << "Warning!\n";
+        result_file << diff << " :: " << pred[i] << " : " << vars[num_vars][i] << "\n";
     }
     result_file.close();
+
+    std::cout << "\nResults written to: " << output_file << std::endl;
+
+    // Clean up
+    delete[] input_info.tokens;
+    delete[] input_info.values;
+    for (int i = 0; i < num_vars; i++)
+    {
+        free(vars[i]);
+    }
+    free(vars);
+    free(pred);
 
     return 0;
 }
