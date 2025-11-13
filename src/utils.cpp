@@ -354,15 +354,14 @@ void save_aggregated_results(const std::string &digest_file, const AggregatedRes
                     << " MSE " << results.mse_values[i]
                     << " Median " << results.median_values[i]
                     << " StdDev " << results.stdev_values[i]
-                    << " InitTime " << results.init_times[i]
-                    << " EvalTime " << results.eval_times[i]
                     << "\n";
     }
 
     result_file.close();
 
     // Print summary to console
-    std::cout << "\n" << std::string(60, '=') << std::endl;
+    std::cout << "\n"
+              << std::string(60, '=') << std::endl;
     std::cout << "Aggregated Results (" << results.num_exprs << " expressions)" << std::endl;
     std::cout << std::string(60, '-') << std::endl;
     std::cout << "Timing Breakdown:" << std::endl;
@@ -386,146 +385,99 @@ void free_aggregated_results(AggregatedResults &results)
         delete[] results.mse_values;
         delete[] results.median_values;
         delete[] results.stdev_values;
-        delete[] results.init_times;
-        delete[] results.eval_times;
         results.num_exprs = 0;
     }
 }
 
 void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_info,
-                               double (*eval_func)(int *, double *, double *, int, int),
+                               MultiEvalFunc multi_eval_func,
                                TimePoint start_time)
 {
-    // Special case: single expression with detailed output
-    if (input_info.num_exprs == 1)
+    // ============================================
+    // PHASE 1: Load all data (Total Init Time)
+    // ============================================
+    TimePoint init_start = measure_clock();
+
+    // Allocate arrays for all expression data
+    double ***all_vars = new double **[input_info.num_exprs];
+
+    // Load all expression data files
+    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
     {
-        int expr_id = 0;
         int num_vars = input_info.num_vars[expr_id];
         int num_dps = input_info.num_dps[expr_id];
-        int num_tokens = input_info.num_tokens[expr_id];
-        int *tokens = input_info.tokens[expr_id];
-        double *values = input_info.values[expr_id];
         std::string data_filename = input_info.data_filenames[expr_id];
 
-        // Load data
-        TimePoint load_start = measure_clock();
-        double **vars = load_data_file(data_filename, num_vars, num_dps);
-        double load_time_ms = clock_to_ms(load_start, measure_clock());
-
-        // Evaluate
-        TimePoint eval_start = measure_clock();
-        double *pred = (double *)malloc(num_dps * sizeof(double));
-        for (int dp = 0; dp < num_dps; dp++)
-        {
-            double *x = (double *)malloc((num_vars + 1) * sizeof(double));
-            for (int i = 0; i <= num_vars; i++)
-                x[i] = vars[i][dp];
-            double y = eval_func(tokens, values, x, num_tokens, num_vars);
-            pred[dp] = y;
-            free(x);
-        }
-        double eval_time_ms = clock_to_ms(eval_start, measure_clock());
-
-        // Format and calculate statistics
-        TimePoint output_start = measure_clock();
-        std::cout << "\nFormula: " << format_formula(tokens, values, num_tokens) << std::endl;
-
-        ResultInfo result_info = make_result_info(pred, vars, num_vars, num_dps,
-                                                  load_time_ms, eval_time_ms, 0.0);
-        result_info.output_time_ms = clock_to_ms(output_start, measure_clock());
-
-        // Create output filename
-        size_t last_slash = digest_file.find_last_of('/');
-        std::string filename = (last_slash != std::string::npos) ? digest_file.substr(last_slash + 1) : digest_file;
-        size_t dot_pos = filename.find_last_of('.');
-        std::string base_name = (dot_pos != std::string::npos) ? filename.substr(0, dot_pos) : filename;
-        std::string output_name = base_name + "_expr_001.txt";
-
-        ExpressionInfo expr_info;
-        expr_info.num_vars = num_vars;
-        expr_info.num_dps = num_dps;
-        expr_info.num_tokens = num_tokens;
-        expr_info.tokens = tokens;
-        expr_info.values = values;
-        expr_info.data_filename = data_filename;
-
-        save_results(output_name, expr_info, result_info, vars);
-
-        // Clean up
-        free_result_info(result_info);
-        free_data(vars, num_vars);
-        return;
+        all_vars[expr_id] = load_data_file(data_filename, num_vars, num_dps);
     }
 
-    // Multi-expression case: aggregated results
+    double total_init_time = clock_to_ms(init_start, measure_clock());
+
+    // ============================================
+    // PHASE 2: Allocate prediction arrays
+    // ============================================
+    double **all_predictions = new double *[input_info.num_exprs];
+    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
+    {
+        int num_dps = input_info.num_dps[expr_id];
+        all_predictions[expr_id] = new double[num_dps];
+    }
+
+    // ============================================
+    // PHASE 3: Evaluate (Total Eval Time)
+    // BLACK BOX: CPU or GPU implementation
+    // ============================================
+    TimePoint eval_start = measure_clock();
+
+    multi_eval_func(input_info, all_vars, all_predictions);
+
+    double total_eval_time = clock_to_ms(eval_start, measure_clock());
+
+    // ============================================
+    // PHASE 4: Calculate statistics per expression
+    // ============================================
     AggregatedResults agg_results;
     agg_results.num_exprs = input_info.num_exprs;
     agg_results.mse_values = new double[agg_results.num_exprs];
     agg_results.median_values = new double[agg_results.num_exprs];
     agg_results.stdev_values = new double[agg_results.num_exprs];
-    agg_results.init_times = new double[agg_results.num_exprs];
-    agg_results.eval_times = new double[agg_results.num_exprs];
 
     for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
     {
         int num_vars = input_info.num_vars[expr_id];
         int num_dps = input_info.num_dps[expr_id];
-        int num_tokens = input_info.num_tokens[expr_id];
-        int *tokens = input_info.tokens[expr_id];
-        double *values = input_info.values[expr_id];
-        std::string data_filename = input_info.data_filenames[expr_id];
 
-        // Load data
-        TimePoint load_start = measure_clock();
-        double **vars = load_data_file(data_filename, num_vars, num_dps);
-        double load_time_ms = clock_to_ms(load_start, measure_clock());
+        ResultInfo result_info = make_result_info(
+            all_predictions[expr_id],
+            all_vars[expr_id],
+            num_vars,
+            num_dps,
+            0.0, // No per-expr init time
+            0.0, // No per-expr eval time
+            0.0);
 
-        // Evaluate
-        TimePoint eval_start = measure_clock();
-        double *pred = (double *)malloc(num_dps * sizeof(double));
-        for (int dp = 0; dp < num_dps; dp++)
-        {
-            double *x = (double *)malloc((num_vars + 1) * sizeof(double));
-            for (int i = 0; i <= num_vars; i++)
-                x[i] = vars[i][dp];
-            double y = eval_func(tokens, values, x, num_tokens, num_vars);
-            pred[dp] = y;
-            free(x);
-        }
-        double eval_time_ms = clock_to_ms(eval_start, measure_clock());
-
-        // Calculate statistics
-        ResultInfo result_info = make_result_info(pred, vars, num_vars, num_dps,
-                                                  load_time_ms, eval_time_ms, 0.0);
-
-        // Store in aggregated results
         agg_results.mse_values[expr_id] = result_info.mse;
         agg_results.median_values[expr_id] = result_info.median;
         agg_results.stdev_values[expr_id] = result_info.stdev;
-        agg_results.init_times[expr_id] = load_time_ms;
-        agg_results.eval_times[expr_id] = eval_time_ms;
 
-        // Clean up
         free_result_info(result_info);
-        free_data(vars, num_vars);
     }
 
-    // Calculate totals and averages (skip NaN/inf values)
+    // ============================================
+    // PHASE 5: Calculate totals and averages
+    // ============================================
     agg_results.total_time_ms = clock_to_ms(start_time, measure_clock());
-    agg_results.total_init_ms = 0.0;
-    agg_results.total_eval_ms = 0.0;
+    agg_results.total_init_ms = total_init_time;
+    agg_results.total_eval_ms = total_eval_time;
+
     agg_results.avg_mse = 0.0;
     agg_results.avg_median = 0.0;
     agg_results.avg_stdev = 0.0;
     int valid_count = 0;
-    
+
+    // Calculate averages (skip NaN/inf)
     for (int i = 0; i < agg_results.num_exprs; i++)
     {
-        // Sum timing values
-        agg_results.total_init_ms += agg_results.init_times[i];
-        agg_results.total_eval_ms += agg_results.eval_times[i];
-        
-        // Average metrics (skip NaN/inf)
         if (std::isfinite(agg_results.mse_values[i]) &&
             std::isfinite(agg_results.median_values[i]) &&
             std::isfinite(agg_results.stdev_values[i]))
@@ -536,6 +488,7 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
             valid_count++;
         }
     }
+
     if (valid_count > 0)
     {
         agg_results.avg_mse /= valid_count;
@@ -543,10 +496,19 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
         agg_results.avg_stdev /= valid_count;
     }
 
-    // Save aggregated results
+    // ============================================
+    // PHASE 6: Save results and cleanup
+    // ============================================
     save_aggregated_results(digest_file, agg_results);
 
-    // Clean up
+    // Cleanup
+    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
+    {
+        free_data(all_vars[expr_id], input_info.num_vars[expr_id]);
+        delete[] all_predictions[expr_id];
+    }
+    delete[] all_vars;
+    delete[] all_predictions;
     free_aggregated_results(agg_results);
 }
 

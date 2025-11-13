@@ -50,11 +50,9 @@ typedef struct {
     double *mse_values;     // MSE for each expression
     double *median_values;  // Median for each expression
     double *stdev_values;   // StdDev for each expression
-    double *init_times;     // Init time for each expression
-    double *eval_times;     // Eval time for each expression
     double total_time_ms;   // Total wall-clock time
-    double total_init_ms;   // Sum of all init times
-    double total_eval_ms;   // Sum of all eval times
+    double total_init_ms;   // Total data loading time
+    double total_eval_ms;   // Total evaluation time (black box)
     double avg_mse;         // Average MSE across all expressions
     double avg_median;      // Average median across all expressions
     double avg_stdev;       // Average stdev across all expressions
@@ -79,9 +77,13 @@ void save_results(const std::string& digest_file, const ExpressionInfo& expr_inf
 // Save aggregated results (multi-expression)
 void save_aggregated_results(const std::string& digest_file, const AggregatedResults& results);
 
+// Multi-expression batch evaluation function type
+// Takes all input data, fills all prediction arrays
+typedef void (*MultiEvalFunc)(InputInfo& input_info, double ***all_vars, double **all_predictions);
+
 // High-level evaluation function (handles both single and multi expressions)
 void evaluate_and_save_results(const std::string& digest_file, InputInfo& input_info,
-                                double (*eval_func)(int*, double*, double*, int, int),
+                                MultiEvalFunc multi_eval_func,
                                 TimePoint start_time);
 
 // Free result info

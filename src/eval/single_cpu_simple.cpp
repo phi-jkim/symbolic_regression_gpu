@@ -113,6 +113,37 @@ double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int
     return stk[0];
 }
 
+// Batch evaluation function for CPU
+// Processes all expressions and fills prediction arrays
+void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions)
+{
+    // Process each expression
+    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
+    {
+        int num_vars = input_info.num_vars[expr_id];
+        int num_dps = input_info.num_dps[expr_id];
+        int num_tokens = input_info.num_tokens[expr_id];
+        int *tokens = input_info.tokens[expr_id];
+        double *values = input_info.values[expr_id];
+        double **vars = all_vars[expr_id];
+        double *pred = all_predictions[expr_id];
+        
+        // Evaluate all datapoints for this expression
+        for (int dp = 0; dp < num_dps; dp++)
+        {
+            // Prepare input variables for this datapoint
+            double *x = (double *)malloc((num_vars + 1) * sizeof(double));
+            for (int i = 0; i <= num_vars; i++)
+                x[i] = vars[i][dp];
+            
+            // Evaluate and store prediction
+            pred[dp] = eval_tree_cpu(tokens, values, x, num_tokens, num_vars);
+            
+            free(x);
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     TimePoint main_start = measure_clock();
@@ -134,8 +165,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // Evaluate and save results (handles both single and multi-expression)
-    evaluate_and_save_results(digest_file, input_info, eval_tree_cpu, main_start);
+    // Evaluate and save results (batch evaluation)
+    evaluate_and_save_results(digest_file, input_info, eval_cpu_batch, main_start);
 
     // Clean up
     free_input_info(input_info);

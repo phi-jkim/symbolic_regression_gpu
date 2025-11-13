@@ -73,6 +73,37 @@ run_cpu_eval_multi: $(CPU_EVAL_BIN)
 run_cpu_eval: run_cpu_eval_single
 
 # ============================================================================
+# GPU Evaluation Targets (for Feynman equation evaluation)
+# ============================================================================
+GPU_EVAL_BIN = $(BUILD_DIR)/gpu_eval
+GPU_EVAL_SRC = src/eval/single_gpu_simple.cu
+
+# Adjust -arch based on your GPU:
+# - sm_60: Pascal (GTX 10 series, Tesla P100)
+# - sm_70: Volta (Tesla V100)
+# - sm_75: Turing (RTX 20 series, Tesla T4)
+# - sm_80: Ampere (RTX 30 series, A100)
+# - sm_86: RTX 3090
+# - sm_89: RTX 4090, L40S
+GPU_ARCH ?= sm_70
+NVCCFLAGS = -std=c++11 -O3 -arch=$(GPU_ARCH)
+
+$(GPU_EVAL_BIN): $(UTILS_SRC) $(GPU_EVAL_SRC)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -o $@ $(UTILS_SRC) $(GPU_EVAL_SRC)
+
+# Test with single expression
+run_gpu_eval_single: $(GPU_EVAL_BIN)
+	$(GPU_EVAL_BIN) data/ai_feyn/singles/input_001.txt
+
+# Test with multiple expressions
+run_gpu_eval_multi: $(GPU_EVAL_BIN)
+	$(GPU_EVAL_BIN) data/ai_feyn/multi/input_100_10k.txt
+
+# Default GPU run target (multi expression)
+run_gpu_eval: run_gpu_eval_multi
+
+# ============================================================================
 
 clean:
 	rm -f $(TARGET) run_gpu $(TEST_BIN) $(BENCH_BIN)
