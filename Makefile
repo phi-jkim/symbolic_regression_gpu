@@ -5,7 +5,6 @@ NVCC ?= /usr/local/cuda/bin/nvcc
 NVFLAGS ?= -O3 \
   -gencode arch=compute_89,code=sm_89 \
   -gencode arch=compute_89,code=compute_89 \
-  -ccbin g++-12 \
   -Wno-deprecated-gpu-targets
 TARGET := libevaltree.so
 SRC := eval_tree.cu
@@ -98,7 +97,6 @@ GPU_ARCH ?= sm_75
 # Use GCC 12 for NVCC to avoid compatibility issues with GCC 13+
 # Suppress deprecated GPU target warnings
 NVCCFLAGS = -std=c++11 -O3 -arch=$(GPU_ARCH) \
-	-ccbin g++-12 \
 	-Wno-deprecated-gpu-targets
 
 $(GPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVAL_SRC)
