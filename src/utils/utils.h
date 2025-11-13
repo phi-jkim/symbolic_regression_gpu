@@ -64,6 +64,9 @@ InputInfo parse_input_info(const std::string& input_file);
 // Load data from Feynman data file
 double** load_data_file(const std::string& filename, int num_vars, int num_dps);
 
+// Load all data files in parallel (for multi-expression workloads)
+void load_all_data_parallel(InputInfo &input_info, double ***all_vars, int num_threads = 8);
+
 // Format formula from tokens for display
 std::string format_formula(int *tokens, double *values, int num_tokens);
 

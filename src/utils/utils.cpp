@@ -50,6 +50,8 @@
 #include <cmath>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <thread>
+#include <atomic>
 
 std::string format_formula(int *tokens, double *values, int num_tokens)
 {
@@ -193,22 +195,93 @@ double **load_data_file(const std::string &filename, int num_vars, int num_dps)
         vars[i] = (double *)malloc(num_dps * sizeof(double));
     }
 
-    // Read data from file
-    std::ifstream data_file(filename);
-    if (!data_file.is_open())
+    // Open file and get size
+    FILE *file = fopen(filename.c_str(), "rb");
+    if (!file)
     {
         std::cerr << "Error: Could not open data file: " << filename << std::endl;
         return vars;
     }
 
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    // Allocate buffer for entire file
+    char *buffer = (char *)malloc(file_size + 1);
+    if (!buffer)
+    {
+        std::cerr << "Error: Could not allocate buffer for file: " << filename << std::endl;
+        fclose(file);
+        return vars;
+    }
+
+    // Read entire file into buffer
+    size_t bytes_read = fread(buffer, 1, file_size, file);
+    fclose(file);
+
+    if (bytes_read != (size_t)file_size)
+    {
+        std::cerr << "Error: Could not read entire file: " << filename << std::endl;
+        free(buffer);
+        return vars;
+    }
+
+    buffer[file_size] = '\0'; // Null-terminate for safety
+
+    // Fast parsing with strtod
+    char *ptr = buffer;
+    char *end = buffer + file_size;
+
     for (int j = 0; j < num_dps; j++)
     {
         for (int i = 0; i <= num_vars; i++)
-            data_file >> vars[i][j];
+        {
+            vars[i][j] = strtod(ptr, &ptr);
+            // Skip whitespace (space, newline, tab, carriage return)
+            while (ptr < end && (*ptr == ' ' || *ptr == '\n' || *ptr == '\t' || *ptr == '\r'))
+            {
+                ptr++;
+            }
+        }
     }
 
-    data_file.close();
+    // Free the buffer
+    free(buffer);
+
     return vars;
+}
+
+void load_all_data_parallel(InputInfo &input_info, double ***all_vars, int num_threads)
+{
+    // Use atomic counter for work distribution
+    std::atomic<int> next_expr(0);
+    std::vector<std::thread> threads;
+
+    // Worker function - each thread processes expressions until none remain
+    auto worker = [&]() {
+        while (true) {
+            int expr_id = next_expr.fetch_add(1);
+            if (expr_id >= input_info.num_exprs) break;
+
+            int num_vars = input_info.num_vars[expr_id];
+            int num_dps = input_info.num_dps[expr_id];
+            std::string data_filename = input_info.data_filenames[expr_id];
+            
+            all_vars[expr_id] = load_data_file(data_filename, num_vars, num_dps);
+        }
+    };
+
+    // Launch worker threads
+    for (int i = 0; i < num_threads; i++) {
+        threads.emplace_back(worker);
+    }
+
+    // Wait for all threads to complete
+    for (auto& t : threads) {
+        t.join();
+    }
 }
 
 ResultInfo make_result_info(double *pred, double **vars, int num_vars, int num_dps,
@@ -401,15 +474,8 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     // Allocate arrays for all expression data
     double ***all_vars = new double **[input_info.num_exprs];
 
-    // Load all expression data files
-    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
-    {
-        int num_vars = input_info.num_vars[expr_id];
-        int num_dps = input_info.num_dps[expr_id];
-        std::string data_filename = input_info.data_filenames[expr_id];
-
-        all_vars[expr_id] = load_data_file(data_filename, num_vars, num_dps);
-    }
+    // Load all expression data files in parallel (8 worker threads)
+    load_all_data_parallel(input_info, all_vars, 8);
 
     double total_init_time = clock_to_ms(init_start, measure_clock());
 

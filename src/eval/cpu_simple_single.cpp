@@ -1,7 +1,7 @@
 #include <iostream>
 #include <string>
 #include <cmath>
-#include "../utils.h"
+#include "../utils/utils.h"
 
 double eval_op(int op, double val1, double val2)
 {

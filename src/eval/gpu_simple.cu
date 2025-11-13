@@ -2,7 +2,7 @@
 #include <iostream>
 #include <string>
 #include <cmath>
-#include "../utils.h"
+#include "../utils/utils.h"
 
 // CUDA error checking macro
 #define CUDA_CHECK(call) \

@@ -58,7 +58,7 @@ CXXFLAGS = -std=c++11 -O3 -Wall
 
 BUILD_DIR = build
 CPU_EVAL_BIN = $(BUILD_DIR)/cpu_eval
-UTILS_SRC = src/utils.cpp
+UTILS_SRC = src/utils/utils.cpp
 MAIN_SRC = src/main.cpp
 CPU_EVAL_SRC = src/eval/cpu_simple_single.cpp
 
@@ -119,6 +119,44 @@ run_gpu_eval_sample: $(GPU_EVAL_BIN)
 
 # Default GPU run target (multi expression)
 run_gpu_eval: run_gpu_eval_multi
+
+# ============================================================================
+# GPU Jinha Evaluation (using eval_tree.cu library)
+# ============================================================================
+GPU_JINHA_BIN = $(BUILD_DIR)/gpu_jinha_eval
+GPU_JINHA_SRC = src/eval/gpu_simple_jinha.cu
+UTILS_CU_SRC = src/utils/utils.cu
+
+$(GPU_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_CU_SRC) $(GPU_JINHA_SRC)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_SRC) $(UTILS_CU_SRC)
+
+# Test with single expression
+run_gpu_jinha_eval_single: $(GPU_JINHA_BIN)
+	$(GPU_JINHA_BIN) data/ai_feyn/singles/input_001.txt
+
+# Test with multiple expressions
+run_gpu_jinha_eval_multi: $(GPU_JINHA_BIN)
+	$(GPU_JINHA_BIN) data/ai_feyn/multi/input_100_100k.txt
+
+# Test with sample input (2 expressions, 1000 data points each)
+run_gpu_jinha_eval_sample: $(GPU_JINHA_BIN)
+	$(GPU_JINHA_BIN) data/examples/sample_input.txt
+
+# Default GPU Jinha run target
+run_gpu_jinha_eval: run_gpu_jinha_eval_sample
+
+# Compare all three implementations
+compare_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN)
+	@echo "=== CPU Simple ==="
+	@time $(CPU_EVAL_BIN) data/examples/sample_input.txt
+	@echo ""
+	@echo "=== GPU Simple ==="
+	@time $(GPU_EVAL_BIN) data/examples/sample_input.txt
+	@echo ""
+	@echo "=== GPU Jinha (eval_tree) ==="
+	@time $(GPU_JINHA_BIN) data/examples/sample_input.txt
 
 # ============================================================================
 
