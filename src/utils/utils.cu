@@ -367,3 +367,154 @@ extern "C" void eval_tree_gpu(const int* tokens,
     cudaFree(d_x);
     cudaFree(d_out);
 }
+
+// ---- Async double-buffer evaluator (single expression, multiple datapoints) ----
+
+__global__ void eval_async_kernel(const int* __restrict__ tokens,
+                                   const float* __restrict__ values,
+                                   const float* __restrict__ X,
+                                   int len,
+                                   int num_features,
+                                   int dataPoints,
+                                   float* __restrict__ out) {
+    if (len <= 0 || len > MAX_EVAL_STACK) return;
+
+    extern __shared__ float shmem[];
+    float* buf0 = shmem;
+    float* buf1 = shmem + (size_t)blockDim.x * (size_t)num_features;
+
+    const int tile = blockDim.x;
+    const int tiles_per_grid_y = gridDim.y > 0 ? gridDim.y : 1;
+    int t0 = blockIdx.y * tile;
+    const int stride = tile * tiles_per_grid_y;
+
+    const int tid = threadIdx.x;
+
+    // Lambda to copy a tile of data
+    // Uses cp.async on sm_80+ (Ampere), falls back to sync copy on older GPUs
+    auto copy_tile = [&](int start, float* dst) {
+        const int dp = start + tid;
+        if (dp < dataPoints) {
+            const float* src = X + (size_t)dp * (size_t)num_features;
+#if __CUDA_ARCH__ >= 800
+            // Ampere+ (sm_80): Use async copy for true double-buffering
+            int f = 0;
+            for (; f + 3 < num_features; f += 4) {
+                void* sptr = (void*)(&dst[(size_t)tid * (size_t)num_features + f]);
+                const void* gptr = (const void*)(&src[f]);
+                if ((((uintptr_t)sptr | (uintptr_t)gptr) & 0xF) == 0) {
+                    cp_async4(sptr, gptr);
+                } else {
+                    cp_async<4>((void*)((float*)sptr + 0), (const void*)((const float*)gptr + 0));
+                    cp_async<4>((void*)((float*)sptr + 1), (const void*)((const float*)gptr + 1));
+                    cp_async<4>((void*)((float*)sptr + 2), (const void*)((const float*)gptr + 2));
+                    cp_async<4>((void*)((float*)sptr + 3), (const void*)((const float*)gptr + 3));
+                }
+            }
+            for (; f < num_features; ++f) {
+                cp_async<4>(&dst[(size_t)tid * (size_t)num_features + f], &src[f]);
+            }
+#else
+            // Pre-Ampere (sm_75 and below): Fallback to synchronous copy
+            for (int f = 0; f < num_features; ++f) {
+                dst[(size_t)tid * (size_t)num_features + f] = src[f];
+            }
+#endif
+        } else {
+            // Zero-pad when past the end
+            for (int f = 0; f < num_features; ++f) {
+                dst[(size_t)tid * (size_t)num_features + f] = 0.0f;
+            }
+        }
+    };
+
+    if (t0 >= dataPoints) return;
+
+    // Stage 0: prefetch first tile into buf0
+    copy_tile(t0, buf0);
+#if __CUDA_ARCH__ >= 800
+    async_commit_group();
+    async_wait_pending<0>();
+#endif
+    __syncthreads();
+
+    int t = t0;
+    float* cur = buf0;
+    float* nxt = buf1;
+
+    // Double-buffer pipeline
+    // sm_80+: Async copy overlaps with compute
+    // sm_75: Synchronous copy, still benefits from double-buffering pattern
+    while (t < dataPoints) {
+        const int next_t = t + stride;
+        if (next_t < dataPoints) {
+            copy_tile(next_t, nxt);
+#if __CUDA_ARCH__ >= 800
+            async_commit_group();
+#endif
+        }
+
+        const int dp = t + tid;
+        if (dp < dataPoints) {
+            float s_val[MAX_EVAL_STACK];
+            int   s_tag[MAX_EVAL_STACK];
+            float s_pa[MAX_EVAL_STACK];
+            float s_pb[MAX_EVAL_STACK];
+            int sp = 0;
+
+            // Evaluate expression tree
+            for (int i = len - 1; i >= 0; --i) {
+                const int tt = tokens[i];
+                if (tt == TOK_CONST) {
+                    s_val[sp] = values[i]; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+                } else if (tt == TOK_VAR) {
+                    int fidx = (int)values[i];
+                    float v = (fidx >= 0 && fidx < num_features) ? cur[(size_t)tid * (size_t)num_features + fidx] : 0.0f;
+                    s_val[sp] = v; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+                } else {
+                    const int ar = op_arity(tt);
+                    if (ar == 1) {
+                        float a = s_val[--sp];
+                        float r = apply_op(tt, a, 0.0f);
+                        s_val[sp] = r; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+                    } else if (ar == 2) {
+                        float a_v = s_val[--sp];
+                        float b_v = s_val[--sp];
+                        float r;
+                        if (tt == OP_ADD)      r = clamp_val(a_v + b_v);
+                        else if (tt == OP_SUB) r = clamp_val(a_v - b_v);
+                        else if (tt == OP_MUL) r = clamp_val(a_v * b_v);
+                        else if (tt == OP_DIV) r = (b_v == 0.0f) ? NAN : a_v / b_v;
+                        else                    r = apply_op(tt, a_v, b_v);
+                        s_val[sp] = r; s_tag[sp] = 0; s_pa[sp] = 0.0f; s_pb[sp] = 0.0f; ++sp;
+                    }
+                }
+            }
+            out[dp] = (sp > 0) ? s_val[sp - 1] : 0.0f;
+        }
+
+        // Wait for async copy to complete (sm_80+) and sync before swapping buffers
+#if __CUDA_ARCH__ >= 800
+        async_wait_pending<0>();
+#endif
+        __syncthreads();
+        float* tmp = cur; cur = nxt; nxt = tmp;
+        t = next_t;
+    }
+}
+
+extern "C" void eval_tree_gpu_async(const int* tokens,
+                                    const float* values,
+                                    const float* X,
+                                    int len,
+                                    int num_features,
+                                    int dataPoints,
+                                    float* out_dev,
+                                    int blocks_y,
+                                    int threads) {
+    if (threads <= 0) threads = 256;
+    if (blocks_y <= 0) blocks_y = (dataPoints + threads - 1) / threads;
+    dim3 grid(1, blocks_y, 1);
+    size_t smem = sizeof(float) * (size_t)threads * (size_t)num_features * 2u;
+    eval_async_kernel<<<grid, threads, smem>>>(tokens, values, X, len, num_features, dataPoints, out_dev);
+}

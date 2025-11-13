@@ -159,6 +159,46 @@ compare_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN)
 	@time $(GPU_JINHA_BIN) data/examples/sample_input.txt
 
 # ============================================================================
+# GPU Async Jinha Evaluation (using async double-buffer from eval_tree.cu)
+# ============================================================================
+GPU_ASYNC_JINHA_BIN = $(BUILD_DIR)/gpu_async_jinha_eval
+GPU_ASYNC_JINHA_SRC = src/eval/gpu_async_jinha.cu
+
+$(GPU_ASYNC_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_CU_SRC) $(GPU_ASYNC_JINHA_SRC)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_ASYNC_JINHA -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_ASYNC_JINHA_SRC) $(UTILS_CU_SRC)
+
+# Test with single expression
+run_gpu_async_jinha_eval_single: $(GPU_ASYNC_JINHA_BIN)
+	$(GPU_ASYNC_JINHA_BIN) data/ai_feyn/singles/input_001.txt
+
+# Test with multiple expressions
+run_gpu_async_jinha_eval_multi: $(GPU_ASYNC_JINHA_BIN)
+	$(GPU_ASYNC_JINHA_BIN) data/ai_feyn/multi/input_100_100k.txt
+
+# Test with sample input (2 expressions, 1000 data points each)
+run_gpu_async_jinha_eval_sample: $(GPU_ASYNC_JINHA_BIN)
+	$(GPU_ASYNC_JINHA_BIN) data/examples/sample_input.txt
+
+# Default GPU Async Jinha run target
+run_gpu_async_jinha_eval: run_gpu_async_jinha_eval_sample
+
+# Compare all four implementations
+compare_all_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN) $(GPU_ASYNC_JINHA_BIN)
+	@echo "=== CPU Simple ==="
+	@time $(CPU_EVAL_BIN) data/examples/sample_input.txt
+	@echo ""
+	@echo "=== GPU Simple ==="
+	@time $(GPU_EVAL_BIN) data/examples/sample_input.txt
+	@echo ""
+	@echo "=== GPU Jinha (batch) ==="
+	@time $(GPU_JINHA_BIN) data/examples/sample_input.txt
+	@echo ""
+	@echo "=== GPU Async Jinha (double-buffer) ==="
+	@time $(GPU_ASYNC_JINHA_BIN) data/examples/sample_input.txt
+
+# ============================================================================
 
 clean:
 	rm -f $(TARGET) run_gpu $(TEST_BIN) $(BENCH_BIN)

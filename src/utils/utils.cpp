@@ -155,9 +155,9 @@ InputInfo parse_input_info(const std::string &input_file)
         file >> info.num_dps[expr_id];
         file >> info.num_tokens[expr_id];
 
-        std::cout << "  Expression " << (expr_id + 1) << ": " << info.num_vars[expr_id]
-                  << " vars, " << info.num_dps[expr_id] << " dps, "
-                  << info.num_tokens[expr_id] << " tokens" << std::endl;
+        // std::cout << "  Expression " << (expr_id + 1) << ": " << info.num_vars[expr_id]
+        //           << " vars, " << info.num_dps[expr_id] << " dps, "
+        //           << info.num_tokens[expr_id] << " tokens" << std::endl;
 
         // Allocate and read tokens
         info.tokens[expr_id] = new int[info.num_tokens[expr_id]];
