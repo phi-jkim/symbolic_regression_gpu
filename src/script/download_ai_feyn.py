@@ -1,5 +1,9 @@
 import os
 import subprocess
+import requests
+import ssl
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,17 +21,30 @@ FILE_URLS = {
     "units.csv": "https://space.mit.edu/home/tegmark/aifeynman/units.csv",
 }
 
-OVERWRITE = True
+OVERWRITE = False
+
+
+class LegacySSLAdapter(HTTPAdapter):
+    """Custom adapter to allow connections to servers with weak DH keys."""
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = create_urllib3_context()
+        ctx.set_ciphers('DEFAULT@SECLEVEL=1')
+        kwargs['ssl_context'] = ctx
+        return super().init_poolmanager(*args, **kwargs)
 
 
 def download_file(url, file_path):
-    command_args = []
-    if "dropbox" in url:
-        command_args += ["wget", "-O", file_path, url]
-    else:
-        command_args += ["curl", "--tlsv1.2", "--tls-max", "1.2", "-o", file_path, url]
     print(f"Downloading {url} to {file_path}")
-    subprocess.run(command_args, check=True)
+    if "dropbox" in url:
+        subprocess.run(["wget", "-O", file_path, url], check=True)
+    else:
+        # Use custom SSL adapter to handle MIT server's weak DH parameters
+        session = requests.Session()
+        session.mount('https://', LegacySSLAdapter())
+        response = session.get(url, timeout=30)
+        response.raise_for_status()
+        with open(file_path, 'wb') as f:
+            f.write(response.content)
 
 
 if __name__ == "__main__":

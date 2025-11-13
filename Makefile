@@ -67,7 +67,11 @@ run_cpu_eval_single: $(CPU_EVAL_BIN)
 
 # Test with multiple expressions
 run_cpu_eval_multi: $(CPU_EVAL_BIN)
-	$(CPU_EVAL_BIN) data/ai_feyn/multi/input_100_10k.txt
+	$(CPU_EVAL_BIN) data/ai_feyn/multi/input_100_100k.txt
+
+# Test with sample input (2 expressions, 1000 data points each)
+run_cpu_eval_sample: $(CPU_EVAL_BIN)
+	$(CPU_EVAL_BIN) data/examples/sample_input.txt
 
 # Default run target (single expression)
 run_cpu_eval: run_cpu_eval_single
@@ -99,6 +103,10 @@ run_gpu_eval_single: $(GPU_EVAL_BIN)
 # Test with multiple expressions
 run_gpu_eval_multi: $(GPU_EVAL_BIN)
 	$(GPU_EVAL_BIN) data/ai_feyn/multi/input_100_10k.txt
+
+# Test with sample input (2 expressions, 1000 data points each)
+run_gpu_eval_sample: $(GPU_EVAL_BIN)
+	$(GPU_EVAL_BIN) data/examples/sample_input.txt
 
 # Default GPU run target (multi expression)
 run_gpu_eval: run_gpu_eval_multi

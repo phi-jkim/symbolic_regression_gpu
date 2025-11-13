@@ -460,6 +460,8 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
         agg_results.median_values[expr_id] = result_info.median;
         agg_results.stdev_values[expr_id] = result_info.stdev;
 
+        // Don't free pred pointer - it's owned by all_predictions array
+        result_info.pred = nullptr;
         free_result_info(result_info);
     }
 
