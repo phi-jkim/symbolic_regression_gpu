@@ -1,14 +1,9 @@
 #!/bin/bash
 # check_cuda.sh - Validate CUDA environment and GPU availability
 #
-# Usage: ./check_cuda.sh [--verbose]
+# Usage: ./check_cuda.sh
 
 set -e
-
-VERBOSE=0
-if [[ "$1" == "--verbose" ]]; then
-    VERBOSE=1
-fi
 
 echo "=== CUDA Environment Check ==="
 echo
@@ -18,9 +13,7 @@ echo -n "Checking nvcc... "
 if command -v nvcc &> /dev/null; then
     NVCC_VERSION=$(nvcc --version | grep "release" | awk '{print $5}' | cut -d',' -f1)
     echo "Found (version $NVCC_VERSION)"
-    if [[ $VERBOSE -eq 1 ]]; then
-        echo "  Path: $(which nvcc)"
-    fi
+    echo "  Path: $(which nvcc)"
 else
     echo "NOT FOUND"
     echo "ERROR: nvcc not found in PATH"
@@ -75,11 +68,9 @@ if [[ $GPU_COUNT -gt 0 ]]; then
 fi
 
 # Check GPU health
-if [[ $VERBOSE -eq 1 ]]; then
-    echo
-    echo "=== GPU Health ==="
-    nvidia-smi --query-gpu=index,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.free --format=csv
-fi
+echo
+echo "=== GPU Health ==="
+nvidia-smi --query-gpu=index,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.free --format=csv
 
 echo
 echo "=== Check Complete ==="

@@ -143,33 +143,3 @@ void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_pred
         }
     }
 }
-
-int main(int argc, char **argv)
-{
-    TimePoint main_start = measure_clock();
-
-    if (argc != 2)
-    {
-        std::cerr << "Usage: " << argv[0] << " <digest_file>" << std::endl;
-        return 1;
-    }
-
-    std::string digest_file = argv[1];
-
-    // Parse input file (handles both single and multiple expressions)
-    InputInfo input_info = parse_input_info(digest_file);
-
-    if (input_info.num_exprs == 0)
-    {
-        std::cerr << "Error: Failed to parse input file" << std::endl;
-        return 1;
-    }
-
-    // Evaluate and save results (batch evaluation)
-    evaluate_and_save_results(digest_file, input_info, eval_cpu_batch, main_start);
-
-    // Clean up
-    free_input_info(input_info);
-
-    return 0;
-}

@@ -1,8 +1,12 @@
-NVCC ?= nvcc
+# Use system CUDA instead of conda/miniforge CUDA to avoid incomplete installations
+NVCC ?= /usr/local/cuda/bin/nvcc
 # Target NVIDIA L40S (Ada, SM 89). Embed PTX for forward-compat JIT.
+# Use GCC 12 for NVCC to avoid compatibility issues with GCC 13+
 NVFLAGS ?= -O3 \
   -gencode arch=compute_89,code=sm_89 \
-  -gencode arch=compute_89,code=compute_89
+  -gencode arch=compute_89,code=compute_89 \
+  -ccbin g++-12 \
+  -Wno-deprecated-gpu-targets
 TARGET := libevaltree.so
 SRC := eval_tree.cu
 
@@ -55,11 +59,12 @@ CXXFLAGS = -std=c++11 -O3 -Wall
 BUILD_DIR = build
 CPU_EVAL_BIN = $(BUILD_DIR)/cpu_eval
 UTILS_SRC = src/utils.cpp
-EVAL_SRC = src/eval/single_cpu_simple.cpp
+MAIN_SRC = src/main.cpp
+CPU_EVAL_SRC = src/eval/cpu_simple_single.cpp
 
-$(CPU_EVAL_BIN): $(UTILS_SRC) $(EVAL_SRC)
+$(CPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(CPU_EVAL_SRC)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ $(UTILS_SRC) $(EVAL_SRC)
+	$(CXX) $(CXXFLAGS) -DUSE_CPU_SIMPLE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_EVAL_SRC)
 
 # Test with single expression
 run_cpu_eval_single: $(CPU_EVAL_BIN)
@@ -80,7 +85,7 @@ run_cpu_eval: run_cpu_eval_single
 # GPU Evaluation Targets (for Feynman equation evaluation)
 # ============================================================================
 GPU_EVAL_BIN = $(BUILD_DIR)/gpu_eval
-GPU_EVAL_SRC = src/eval/single_gpu_simple.cu
+GPU_EVAL_SRC = src/eval/gpu_simple.cu
 
 # Adjust -arch based on your GPU:
 # - sm_60: Pascal (GTX 10 series, Tesla P100)
@@ -89,12 +94,16 @@ GPU_EVAL_SRC = src/eval/single_gpu_simple.cu
 # - sm_80: Ampere (RTX 30 series, A100)
 # - sm_86: RTX 3090
 # - sm_89: RTX 4090, L40S
-GPU_ARCH ?= sm_70
-NVCCFLAGS = -std=c++11 -O3 -arch=$(GPU_ARCH)
+GPU_ARCH ?= sm_75
+# Use GCC 12 for NVCC to avoid compatibility issues with GCC 13+
+# Suppress deprecated GPU target warnings
+NVCCFLAGS = -std=c++11 -O3 -arch=$(GPU_ARCH) \
+	-ccbin g++-12 \
+	-Wno-deprecated-gpu-targets
 
-$(GPU_EVAL_BIN): $(UTILS_SRC) $(GPU_EVAL_SRC)
+$(GPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVAL_SRC)
 	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -o $@ $(UTILS_SRC) $(GPU_EVAL_SRC)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_SIMPLE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVAL_SRC)
 
 # Test with single expression
 run_gpu_eval_single: $(GPU_EVAL_BIN)
@@ -102,7 +111,7 @@ run_gpu_eval_single: $(GPU_EVAL_BIN)
 
 # Test with multiple expressions
 run_gpu_eval_multi: $(GPU_EVAL_BIN)
-	$(GPU_EVAL_BIN) data/ai_feyn/multi/input_100_10k.txt
+	$(GPU_EVAL_BIN) data/ai_feyn/multi/input_100_100k.txt
 
 # Test with sample input (2 expressions, 1000 data points each)
 run_gpu_eval_sample: $(GPU_EVAL_BIN)
