@@ -1,5 +1,6 @@
 # Use system CUDA instead of conda/miniforge CUDA to avoid incomplete installations
-NVCC ?= /usr/local/cuda/bin/nvcc
+# NVCC ?= /usr/local/cuda/bin/nvcc
+NVCC = nvcc
 # Target NVIDIA L40S (Ada, SM 89). Embed PTX for forward-compat JIT.
 # Use GCC 12 for NVCC to avoid compatibility issues with GCC 13+
 NVFLAGS ?= -O3 \
@@ -53,7 +54,7 @@ run_bench: bench
 # CPU Evaluation Targets (for Feynman equation evaluation)
 # ============================================================================
 CXX = g++
-CXXFLAGS = -std=c++11 -O3 -Wall
+CXXFLAGS = -std=c++11 -O3 -Wall -pthread
 
 BUILD_DIR = build
 CPU_EVAL_BIN = $(BUILD_DIR)/cpu_eval
@@ -93,7 +94,7 @@ GPU_EVAL_SRC = src/eval/gpu_simple.cu
 # - sm_80: Ampere (RTX 30 series, A100)
 # - sm_86: RTX 3090
 # - sm_89: RTX 4090, L40S
-GPU_ARCH ?= sm_75
+GPU_ARCH ?= sm_89
 # Use GCC 12 for NVCC to avoid compatibility issues with GCC 13+
 # Suppress deprecated GPU target warnings
 NVCCFLAGS = -std=c++11 -O3 -arch=$(GPU_ARCH) \
