@@ -180,6 +180,8 @@ InputInfo parse_input_info(const std::string &input_file)
 
     file.close();
 
+    std::cout << format_formula(info.tokens[0], info.values[0], info.num_tokens[0]) << std::endl;
+
     std::cout << "Loaded digest file: " << input_file << std::endl;
     std::cout << "Number of expressions: " << info.num_exprs << std::endl;
 
@@ -260,26 +262,31 @@ void load_all_data_parallel(InputInfo &input_info, double ***all_vars, int num_t
     std::vector<std::thread> threads;
 
     // Worker function - each thread processes expressions until none remain
-    auto worker = [&]() {
-        while (true) {
+    auto worker = [&]()
+    {
+        while (true)
+        {
             int expr_id = next_expr.fetch_add(1);
-            if (expr_id >= input_info.num_exprs) break;
+            if (expr_id >= input_info.num_exprs)
+                break;
 
             int num_vars = input_info.num_vars[expr_id];
             int num_dps = input_info.num_dps[expr_id];
             std::string data_filename = input_info.data_filenames[expr_id];
-            
+
             all_vars[expr_id] = load_data_file(data_filename, num_vars, num_dps);
         }
     };
 
     // Launch worker threads
-    for (int i = 0; i < num_threads; i++) {
+    for (int i = 0; i < num_threads; i++)
+    {
         threads.emplace_back(worker);
     }
 
     // Wait for all threads to complete
-    for (auto& t : threads) {
+    for (auto &t : threads)
+    {
         t.join();
     }
 }

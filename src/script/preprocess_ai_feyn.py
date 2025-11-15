@@ -122,54 +122,102 @@ def expr_to_tokens(expr, var_names: List[str]) -> Tuple[List[int], List[float]]:
         "Abs": 24,
     }
 
-    for node in preorder_traversal(expr):
+    def get_node_info(node):
         if node.is_Number:
-            # Constant
-            tokens.append(0)
-            values.append(float(node))
+            return (0, float(node))
         elif node.is_Symbol:
-            # Variable
             name = str(node)
             if name in var_to_idx:
-                tokens.append(-1)
-                values.append(float(var_to_idx[name]))
+                return (-1, float(var_to_idx[name]))
             else:
-                print(f"Warning [Formula {expr}]: Unknown symbol '{name}'")
-                tokens.append(0)
-                values.append(0.0)
+                return (0, 0.0)
         elif node.is_Function:
-            # Unary function
             func_name = type(node).__name__.lower()
             op = func_op_map.get(func_name)
             if op is not None:
-                tokens.append(op)
-                values.append(0.0)  # Dummy value for operators
+                return (op, 0.0)
             else:
                 print(f"Warning [Formula {expr}]: Unsupported function '{func_name}'")
+                return (None, None)
         elif node.is_Add:
-            # ADD operation
-            tokens.append(1)
-            values.append(0.0)
+            return (1, 0.0)
         elif node.is_Mul:
-            # MUL operation
-            tokens.append(3)
-            values.append(0.0)
+            return (3, 0.0)
         elif node.is_Pow:
-            # POW operation
-            tokens.append(5)
-            values.append(0.0)
+            return (5, 0.0)
         elif hasattr(node, "func") and node.func.__name__ == "Min":
-            # MIN operation
-            tokens.append(6)
-            values.append(0.0)
+            return (6, 0.0)
         elif hasattr(node, "func") and node.func.__name__ == "Max":
-            # MAX operation
-            tokens.append(7)
-            values.append(0.0)
+            return (7, 0.0)
         else:
             print(
                 f"Warning [Formula {expr}]: Unsupported node type '{type(node).__name__}'"
             )
+            return (None, None)
+
+    nodes = []
+    for _node in preorder_traversal(expr, keys=True):
+        token, value = get_node_info(_node)
+        is_leaf = token <= 0
+        arg_count = 2 if 1 <= token <= 9 else 1 if 10 <= token else 0
+        nodes.append(
+            {
+                "idx": len(nodes),
+                "node": _node,
+                "token": token,
+                "value": value,
+                "is_leaf": is_leaf,
+                "arg_count": arg_count,
+                "parent": -1,
+                "children": [],
+                "done_children": [],
+            }
+        )
+
+    # build tree
+    trans_queue = []
+    call_stack = [0]
+    for node in nodes[1:]:
+        parent_idx = call_stack[-1]
+        par_node = nodes[parent_idx]
+        par_node["children"].append(node["idx"])
+        node["parent"] = parent_idx
+        if node["is_leaf"]:
+            node["done_children"].append(node["idx"])
+            while len(call_stack):
+                lst_nd = nodes[call_stack[-1]]
+                if len(lst_nd["children"]) == lst_nd["arg_count"]:
+                    call_stack.pop()
+                    if len(lst_nd["done_children"]) == lst_nd["arg_count"]:
+                        trans_queue.append(lst_nd)
+                else:
+                    break
+        else:
+            call_stack.append(node["idx"])
+        # print([nodes[idx] for idx in call_stack])
+
+    assert len(call_stack) == 0
+
+    # make concise order
+    while len(trans_queue):
+        node = trans_queue.pop()
+        idx = node["idx"]
+        if idx == 0:
+            break
+        par_node = nodes[node["parent"]]
+        par_node["done_children"].append(idx)
+        if len(par_node["done_children"]) == par_node["arg_count"]:
+            trans_queue.append(par_node)
+
+    # fill tokens and values
+    def dfs(idx):
+        node = nodes[idx]
+        tokens.append(node["token"])
+        values.append(node["value"])
+        for cidx in node["done_children"]:
+            dfs(cidx)
+
+    dfs(0)
 
     return tokens, values
 
@@ -368,6 +416,9 @@ def create_multi_expression_file(
 
         except Exception as e:
             print(f"Warning: Skipping formula {i+1} due to error: {e}")
+            import traceback
+
+            print(traceback.format_exc())
             continue
 
     # Write multi-expression file
