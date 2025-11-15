@@ -85,7 +85,7 @@ def main():
             raise ValueError(f"Invalid expression (stack size != 1): {expr}")
         expr["max_stack_size"] = max_size
         expr["op_set"] = op_set
-        if max_size > 6:
+        if max_size > 4:
             print(expr)
 
     print("max_stack_size: ", *get_minmax("max_stack_size", expr_info))

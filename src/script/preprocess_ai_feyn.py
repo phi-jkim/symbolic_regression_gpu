@@ -171,25 +171,23 @@ def expr_to_tokens(expr, var_names: List[str]) -> Tuple[List[int], List[float]]:
                 "parent": -1,
                 "children": [],
                 "done_children": [],
+                "depth": 0,
             }
         )
 
     # build tree
-    trans_queue = []
     call_stack = [0]
     for node in nodes[1:]:
         parent_idx = call_stack[-1]
         par_node = nodes[parent_idx]
         par_node["children"].append(node["idx"])
         node["parent"] = parent_idx
+        node["depth"] = len(call_stack)
         if node["is_leaf"]:
-            node["done_children"].append(node["idx"])
             while len(call_stack):
                 lst_nd = nodes[call_stack[-1]]
                 if len(lst_nd["children"]) == lst_nd["arg_count"]:
                     call_stack.pop()
-                    if len(lst_nd["done_children"]) == lst_nd["arg_count"]:
-                        trans_queue.append(lst_nd)
                 else:
                     break
         else:
@@ -199,25 +197,28 @@ def expr_to_tokens(expr, var_names: List[str]) -> Tuple[List[int], List[float]]:
     assert len(call_stack) == 0
 
     # make concise order
-    while len(trans_queue):
-        node = trans_queue.pop()
-        idx = node["idx"]
+    dep_order = [i for i in range(len(nodes))]
+    dep_order.sort(key=lambda x: -nodes[x]["depth"])
+
+    for idx in dep_order:
+        node = nodes[idx]
         if idx == 0:
-            break
+            continue
         par_node = nodes[node["parent"]]
         par_node["done_children"].append(idx)
-        if len(par_node["done_children"]) == par_node["arg_count"]:
-            trans_queue.append(par_node)
 
     # fill tokens and values
     def dfs(idx):
         node = nodes[idx]
+        print(node)
         tokens.append(node["token"])
         values.append(node["value"])
         for cidx in node["done_children"]:
+            print(nodes[cidx])
             dfs(cidx)
 
     dfs(0)
+    assert len(tokens) == len(values) == len(nodes)
 
     return tokens, values
 
