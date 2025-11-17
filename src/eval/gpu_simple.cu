@@ -94,7 +94,7 @@ __device__ double eval_op_gpu(int op, double val1, double val2)
 // GPU version of eval_tree - each thread has its own stack
 __device__ double eval_tree_gpu(int *tokens, double *values, double *x, int num_tokens, int num_vars)
 {
-    double stk[128]; // Local stack per thread
+    double stk[MAX_STACK_SIZE]; // Local stack per thread
     int sp = 0;
     double tmp, val1, val2;
     
@@ -132,7 +132,7 @@ __global__ void eval_kernel(int *d_tokens, double *d_values,
     if (dp_idx < num_dps)
     {
         // Prepare input variables for this datapoint
-        double x[32]; // Max 32 variables (more than enough for Feynman)
+        double x[MAX_VAR_NUM]; // Max variables
         
         for (int i = 0; i <= num_vars; i++)
         {

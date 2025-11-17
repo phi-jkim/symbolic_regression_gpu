@@ -82,6 +82,34 @@ run_cpu_eval_sample: $(CPU_EVAL_BIN)
 run_cpu_eval: run_cpu_eval_single
 
 # ============================================================================
+# CPU Multi-threaded Evaluation Targets
+# ============================================================================
+CPU_MULTI_EVAL_BIN = $(BUILD_DIR)/cpu_multi_eval
+CPU_MULTI_EVAL_SRC = src/eval/cpu_simple_multi.cpp
+
+# Number of CPU worker threads (configurable at compile time)
+CPU_EVAL_THREADS ?= 8
+
+$(CPU_MULTI_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(CPU_MULTI_EVAL_SRC)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -DUSE_CPU_MULTI -DCPU_EVAL_THREADS=$(CPU_EVAL_THREADS) -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_MULTI_EVAL_SRC)
+
+# Test with single expression
+run_cpu_multi_eval_single: $(CPU_MULTI_EVAL_BIN)
+	$(CPU_MULTI_EVAL_BIN) data/ai_feyn/singles/input_001.txt
+
+# Test with multiple expressions
+run_cpu_multi_eval_multi: $(CPU_MULTI_EVAL_BIN)
+	$(CPU_MULTI_EVAL_BIN) data/ai_feyn/multi/input_100_100k.txt
+
+# Test with sample input (2 expressions, 1000 data points each)
+run_cpu_multi_eval_sample: $(CPU_MULTI_EVAL_BIN)
+	$(CPU_MULTI_EVAL_BIN) data/examples/sample_input.txt
+
+# Default run target (multi expression)
+run_cpu_multi_eval: run_cpu_multi_eval_multi
+
+# ============================================================================
 # GPU Evaluation Targets (for Feynman equation evaluation)
 # ============================================================================
 GPU_EVAL_BIN = $(BUILD_DIR)/gpu_eval
@@ -183,10 +211,13 @@ run_gpu_async_jinha_eval_sample: $(GPU_ASYNC_JINHA_BIN)
 # Default GPU Async Jinha run target
 run_gpu_async_jinha_eval: run_gpu_async_jinha_eval_sample
 
-# Compare all four implementations
-compare_all_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN) $(GPU_ASYNC_JINHA_BIN)
-	@echo "=== CPU Simple ==="
+# Compare all implementations
+compare_all_evals: $(CPU_EVAL_BIN) $(CPU_MULTI_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN) $(GPU_ASYNC_JINHA_BIN)
+	@echo "=== CPU Single-threaded ==="
 	@time $(CPU_EVAL_BIN) data/examples/sample_input.txt
+	@echo ""
+	@echo "=== CPU Multi-threaded ($(CPU_EVAL_THREADS) workers) ==="
+	@time CPU_EVAL_THREADS=$(CPU_EVAL_THREADS) $(CPU_MULTI_EVAL_BIN) data/examples/sample_input.txt
 	@echo ""
 	@echo "=== GPU Simple ==="
 	@time $(GPU_EVAL_BIN) data/examples/sample_input.txt

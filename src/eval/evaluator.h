@@ -5,7 +5,7 @@
 
 // Unified evaluation interface
 // The actual implementation (CPU or GPU) is selected at compile time
-// via USE_CPU_SIMPLE, USE_GPU_SIMPLE, USE_GPU_JINHA, or USE_GPU_ASYNC_JINHA preprocessor flags
+// via USE_CPU_SIMPLE, USE_CPU_MULTI, USE_GPU_SIMPLE, USE_GPU_JINHA, or USE_GPU_ASYNC_JINHA preprocessor flags
 
 #if defined(USE_GPU_ASYNC_JINHA)
     // GPU async double-buffer evaluation (defined in gpu_async_jinha.cu)
@@ -19,12 +19,16 @@
     // GPU evaluation function (defined in gpu_simple.cu)
     void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);
     #define eval_batch eval_gpu_batch
+#elif defined(USE_CPU_MULTI)
+    // CPU multi-threaded evaluation function with 8 workers (defined in cpu_simple_multi.cpp)
+    void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);
+    #define eval_batch eval_cpu_batch
 #elif defined(USE_CPU_SIMPLE)
-    // CPU evaluation function (defined in cpu_simple_single.cpp)
+    // CPU single-threaded evaluation function (defined in cpu_simple_single.cpp)
     void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);
     #define eval_batch eval_cpu_batch
 #else
-    #error "Must define USE_CPU_SIMPLE, USE_GPU_SIMPLE, USE_GPU_JINHA, or USE_GPU_ASYNC_JINHA"
+    #error "Must define USE_CPU_SIMPLE, USE_CPU_MULTI, USE_GPU_SIMPLE, USE_GPU_JINHA, or USE_GPU_ASYNC_JINHA"
 #endif
 
 #endif // EVALUATOR_H

@@ -84,8 +84,9 @@ __host__ __device__ inline int op_arity(int op);
 __host__ __device__ inline float apply_op(int op, float a, float b);
 __host__ __device__ inline float safe_div(float a, float b);
 
+// Stack size for expression evaluation (matches MAX_STACK_SIZE from utils.h)
 #ifndef MAX_EVAL_STACK
-#define MAX_EVAL_STACK 128
+#define MAX_EVAL_STACK 16
 #endif
 
 // ---- Batched (datapoint-parallel) evaluator ----

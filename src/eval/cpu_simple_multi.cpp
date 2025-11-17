@@ -1,7 +1,14 @@
 #include <iostream>
 #include <string>
 #include <cmath>
+#include <thread>
+#include <vector>
 #include "../utils/utils.h"
+
+// Number of CPU worker threads (set via -DCPU_EVAL_THREADS=N at compile time)
+#ifndef CPU_EVAL_THREADS
+#define CPU_EVAL_THREADS 8
+#endif
 
 double eval_op(int op, double val1, double val2)
 {
@@ -78,10 +85,9 @@ double eval_op(int op, double val1, double val2)
     }
 }
 
-double stk[MAX_STACK_SIZE];
-
 double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int num_vars)
 {
+    double stk[MAX_STACK_SIZE]; // Thread-local stack for thread safety
     int sp = 0;
     double tmp, val1, val2;
     for (int i = num_tokens - 1; i >= 0; i--)
@@ -113,33 +119,50 @@ double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int
     return stk[0];
 }
 
-// Batch evaluation function for CPU
+// Batch evaluation function for CPU with configurable worker threads
 // Processes all expressions and fills prediction arrays
 void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions)
 {
-    // Process each expression
-    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
+    const int num_workers = CPU_EVAL_THREADS;
+    std::vector<std::thread> threads;
+
+    // Worker function: each thread processes expressions where expr_id % num_workers == worker_id
+    auto worker = [&](int worker_id)
     {
-        int num_vars = input_info.num_vars[expr_id];
-        int num_dps = input_info.num_dps[expr_id];
-        int num_tokens = input_info.num_tokens[expr_id];
-        int *tokens = input_info.tokens[expr_id];
-        double *values = input_info.values[expr_id];
-        double **vars = all_vars[expr_id];
-        double *pred = all_predictions[expr_id];
-        
-        // Evaluate all datapoints for this expression
-        for (int dp = 0; dp < num_dps; dp++)
+        double *x = (double *)malloc(MAX_VAR_NUM * sizeof(double));
+        for (int expr_id = worker_id; expr_id < input_info.num_exprs; expr_id += num_workers)
         {
-            // Prepare input variables for this datapoint
-            double *x = (double *)malloc(MAX_VAR_NUM * sizeof(double));
-            for (int i = 0; i <= num_vars; i++)
-                x[i] = vars[i][dp];
-            
-            // Evaluate and store prediction
-            pred[dp] = eval_tree_cpu(tokens, values, x, num_tokens, num_vars);
-            
-            free(x);
+            int num_vars = input_info.num_vars[expr_id];
+            int num_dps = input_info.num_dps[expr_id];
+            int num_tokens = input_info.num_tokens[expr_id];
+            int *tokens = input_info.tokens[expr_id];
+            double *values = input_info.values[expr_id];
+            double **vars = all_vars[expr_id];
+            double *pred = all_predictions[expr_id];
+
+            // Evaluate all datapoints for this expression
+            for (int dp = 0; dp < num_dps; dp++)
+            {
+                // Prepare input variables for this datapoint
+                for (int i = 0; i <= num_vars; i++)
+                    x[i] = vars[i][dp];
+
+                // Evaluate and store prediction
+                pred[dp] = eval_tree_cpu(tokens, values, x, num_tokens, num_vars);
+            }
         }
+        free(x); // Free the worker's temporary variable array
+    };
+
+    // Launch worker threads
+    for (int i = 0; i < num_workers; i++)
+    {
+        threads.emplace_back(worker, i);
+    }
+
+    // Wait for all threads to complete
+    for (auto &t : threads)
+    {
+        t.join();
     }
 }
