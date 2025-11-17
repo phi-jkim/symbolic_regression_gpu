@@ -59,10 +59,12 @@ CXXFLAGS = -std=c++11 -O3 -Wall -pthread
 BUILD_DIR = build
 CPU_EVAL_BIN = $(BUILD_DIR)/cpu_eval
 UTILS_SRC = src/utils/utils.cpp
+UTILS_HDR = src/utils/utils.h
 MAIN_SRC = src/main.cpp
 CPU_EVAL_SRC = src/eval/cpu_simple_single.cpp
+EVALUATOR_HDR = src/eval/evaluator.h
 
-$(CPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(CPU_EVAL_SRC)
+$(CPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(CPU_EVAL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -DUSE_CPU_SIMPLE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_EVAL_SRC)
 
@@ -90,7 +92,7 @@ CPU_MULTI_EVAL_SRC = src/eval/cpu_simple_multi.cpp
 # Number of CPU worker threads (configurable at compile time)
 CPU_EVAL_THREADS ?= 8
 
-$(CPU_MULTI_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(CPU_MULTI_EVAL_SRC)
+$(CPU_MULTI_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(CPU_MULTI_EVAL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -DUSE_CPU_MULTI -DCPU_EVAL_THREADS=$(CPU_EVAL_THREADS) -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_MULTI_EVAL_SRC)
 
@@ -128,7 +130,7 @@ GPU_ARCH ?= sm_89
 NVCCFLAGS = -std=c++11 -O3 -arch=$(GPU_ARCH) \
 	-Wno-deprecated-gpu-targets
 
-$(GPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVAL_SRC)
+$(GPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_EVAL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_SIMPLE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVAL_SRC)
 
@@ -154,7 +156,7 @@ GPU_JINHA_BIN = $(BUILD_DIR)/gpu_jinha_eval
 GPU_JINHA_SRC = src/eval/gpu_simple_jinha.cu
 UTILS_CU_SRC = src/utils/utils.cu
 
-$(GPU_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_CU_SRC) $(GPU_JINHA_SRC)
+$(GPU_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_JINHA_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA -o $@ \
 		$(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_SRC) $(UTILS_CU_SRC)
@@ -191,7 +193,7 @@ compare_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN)
 GPU_ASYNC_JINHA_BIN = $(BUILD_DIR)/gpu_async_jinha_eval
 GPU_ASYNC_JINHA_SRC = src/eval/gpu_async_jinha.cu
 
-$(GPU_ASYNC_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_CU_SRC) $(GPU_ASYNC_JINHA_SRC)
+$(GPU_ASYNC_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_ASYNC_JINHA_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_ASYNC_JINHA -o $@ \
 		$(MAIN_SRC) $(UTILS_SRC) $(GPU_ASYNC_JINHA_SRC) $(UTILS_CU_SRC)
@@ -217,7 +219,7 @@ compare_all_evals: $(CPU_EVAL_BIN) $(CPU_MULTI_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_J
 	@time $(CPU_EVAL_BIN) data/examples/sample_input.txt
 	@echo ""
 	@echo "=== CPU Multi-threaded ($(CPU_EVAL_THREADS) workers) ==="
-	@time CPU_EVAL_THREADS=$(CPU_EVAL_THREADS) $(CPU_MULTI_EVAL_BIN) data/examples/sample_input.txt
+	@time $(CPU_MULTI_EVAL_BIN) data/examples/sample_input.txt
 	@echo ""
 	@echo "=== GPU Simple ==="
 	@time $(GPU_EVAL_BIN) data/examples/sample_input.txt
