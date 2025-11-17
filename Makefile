@@ -198,6 +198,52 @@ compare_all_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN) $(GPU_ASYNC_
 	@time $(GPU_ASYNC_JINHA_BIN) data/examples/sample_input.txt
 
 # ============================================================================
+# Data Generation
+# ============================================================================
+
+PREPROCESS_SCRIPT := src/script/preprocess_ai_feyn.py
+MULTI_DIR := data/ai_feyn/multi
+SINGLES_DIR := data/ai_feyn/singles
+
+.PHONY: data_gen data_gen_multi data_gen_singles
+
+# Generate all data files
+data_gen: data_gen_multi data_gen_singles
+	@echo ""
+	@echo "=========================================="
+	@echo "All data generation complete!"
+	@echo "=========================================="
+
+# Generate multi-expression files with different datapoint counts
+data_gen_multi:
+	@echo "=========================================="
+	@echo "Generating multi-expression files..."
+	@echo "=========================================="
+	@mkdir -p $(MULTI_DIR)
+	@echo ""
+	@echo "--- Generating 100_10k (10,000 datapoints) ---"
+	python $(PREPROCESS_SCRIPT) --multi --dps 10000
+	@echo ""
+	@echo "--- Generating 100_100k (100,000 datapoints) ---"
+	python $(PREPROCESS_SCRIPT) --multi --dps 100000
+	@echo ""
+	@echo "--- Generating 100_1000k (1,000,000 datapoints) ---"
+	python $(PREPROCESS_SCRIPT) --multi --dps 1000000
+	@echo ""
+	@echo "Multi-expression files generated in $(MULTI_DIR)"
+
+# Generate all single-expression files
+data_gen_singles:
+	@echo ""
+	@echo "=========================================="
+	@echo "Generating single-expression files..."
+	@echo "=========================================="
+	@mkdir -p $(SINGLES_DIR)
+	python $(PREPROCESS_SCRIPT) --write --quiet
+	@echo ""
+	@echo "Single-expression files generated in $(SINGLES_DIR)"
+
+# ============================================================================
 
 clean:
 	rm -f $(TARGET) run_gpu $(TEST_BIN) $(BENCH_BIN)

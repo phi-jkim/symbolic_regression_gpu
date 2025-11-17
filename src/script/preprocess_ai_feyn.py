@@ -82,7 +82,9 @@ def parse_and_binarize(formula_str: str, var_names: List[str]) -> sp.Expr:
     return binary_expr
 
 
-def expr_to_tokens(expr, var_names: List[str]) -> Tuple[List[int], List[float]]:
+def expr_to_tokens(
+    expr, var_names: List[str], reorder: bool = False
+) -> Tuple[List[int], List[float]]:
     """
     Convert a SymPy expression to C++ token format (prefix notation).
     Returns (tokens, values) where:
@@ -92,6 +94,7 @@ def expr_to_tokens(expr, var_names: List[str]) -> Tuple[List[int], List[float]]:
       - 1-5 = binary ops (ADD, SUB, MUL, DIV, POW)
       - 10+ = unary ops (SIN, COS, etc.)
     - values: List of corresponding values or variable indices
+    - reorder: If True, reorder expression to reduce stack size to 4
     """
     from sympy import preorder_traversal
 
@@ -156,7 +159,7 @@ def expr_to_tokens(expr, var_names: List[str]) -> Tuple[List[int], List[float]]:
             return (None, None)
 
     nodes = []
-    for _node in preorder_traversal(expr, keys=True):
+    for _node in preorder_traversal(expr):
         token, value = get_node_info(_node)
         is_leaf = token <= 0
         arg_count = 2 if 1 <= token <= 9 else 1 if 10 <= token else 0
@@ -175,49 +178,52 @@ def expr_to_tokens(expr, var_names: List[str]) -> Tuple[List[int], List[float]]:
             }
         )
 
-    # build tree
-    call_stack = [0]
-    for node in nodes[1:]:
-        parent_idx = call_stack[-1]
-        par_node = nodes[parent_idx]
-        par_node["children"].append(node["idx"])
-        node["parent"] = parent_idx
-        node["depth"] = len(call_stack)
-        if node["is_leaf"]:
-            while len(call_stack):
-                lst_nd = nodes[call_stack[-1]]
-                if len(lst_nd["children"]) == lst_nd["arg_count"]:
-                    call_stack.pop()
-                else:
-                    break
-        else:
-            call_stack.append(node["idx"])
-        # print([nodes[idx] for idx in call_stack])
+    if reorder:
+        # build tree
+        call_stack = [0]
+        for node in nodes[1:]:
+            parent_idx = call_stack[-1]
+            par_node = nodes[parent_idx]
+            par_node["children"].append(node["idx"])
+            node["parent"] = parent_idx
+            node["depth"] = len(call_stack)
+            if node["is_leaf"]:
+                while len(call_stack):
+                    lst_nd = nodes[call_stack[-1]]
+                    if len(lst_nd["children"]) == lst_nd["arg_count"]:
+                        call_stack.pop()
+                    else:
+                        break
+            else:
+                call_stack.append(node["idx"])
+            # print([nodes[idx] for idx in call_stack])
 
-    assert len(call_stack) == 0
+        assert len(call_stack) == 0
 
-    # make concise order
-    dep_order = [i for i in range(len(nodes))]
-    dep_order.sort(key=lambda x: -nodes[x]["depth"])
+        # make concise order
+        dep_order = [i for i in range(len(nodes))]
+        dep_order.sort(key=lambda x: -nodes[x]["depth"])
 
-    for idx in dep_order:
-        node = nodes[idx]
-        if idx == 0:
-            continue
-        par_node = nodes[node["parent"]]
-        par_node["done_children"].append(idx)
+        for idx in dep_order:
+            node = nodes[idx]
+            if idx == 0:
+                continue
+            par_node = nodes[node["parent"]]
+            par_node["done_children"].append(idx)
 
-    # fill tokens and values
-    def dfs(idx):
-        node = nodes[idx]
-        print(node)
-        tokens.append(node["token"])
-        values.append(node["value"])
-        for cidx in node["done_children"]:
-            print(nodes[cidx])
-            dfs(cidx)
+        # fill tokens and values
+        def dfs(idx):
+            node = nodes[idx]
+            tokens.append(node["token"])
+            values.append(node["value"])
+            for cidx in node["done_children"]:
+                dfs(cidx)
 
-    dfs(0)
+        dfs(0)
+    else:
+        tokens = [node["token"] for node in nodes]
+        values = [node["value"] for node in nodes]
+
     assert len(tokens) == len(values) == len(nodes)
 
     return tokens, values
@@ -358,7 +364,10 @@ def write_digest_file(
 
 
 def create_multi_expression_file(
-    digest_csv_filename: str, output_path: str, num_dps: int = 10000
+    digest_csv_filename: str,
+    output_path: str,
+    num_dps: int = 10000,
+    reorder: bool = False,
 ) -> None:
     """
     Create a multi-expression input file with all formulas from the CSV.
@@ -368,6 +377,7 @@ def create_multi_expression_file(
         digest_csv_filename: Path to the CSV file with formulas
         output_path: Path to write the multi-expression file
         num_dps: Number of data points per expression (default: 10000)
+        reorder: Reorder expression tokens to reduce stack size to 4 (default: False)
     """
     # Read CSV file
     df = pd.read_csv(digest_csv_filename)
@@ -398,7 +408,7 @@ def create_multi_expression_file(
                 raise Exception(f"Failed to parse formula")
 
             # Convert to tokens
-            tokens, token_values = expr_to_tokens(binary_expr, var_names)
+            tokens, token_values = expr_to_tokens(binary_expr, var_names, reorder)
 
             # Reconstruct to verify
             reconstructed, _ = tokens_to_string(tokens, token_values, var_names)
@@ -454,7 +464,10 @@ def create_multi_expression_file(
 
 
 def main(
-    digest_csv_filename: str, quiet: bool = False, write_output: bool = False
+    digest_csv_filename: str,
+    quiet: bool = False,
+    write_output: bool = False,
+    reorder: bool = False,
 ) -> None:
     # Read CSV file
     df = pd.read_csv(digest_csv_filename)
@@ -501,7 +514,7 @@ def main(
             print(f"\nBinarized: {binary_expr}")
 
         # Convert to C++ token format
-        tokens, token_values = expr_to_tokens(binary_expr, var_names)
+        tokens, token_values = expr_to_tokens(binary_expr, var_names, reorder)
 
         # Sanity check: Check if all variables are used
         used_var_indices = set()
@@ -583,35 +596,118 @@ def main(
 
 
 if __name__ == "__main__":
-    import sys
+    import argparse
 
-    digest_csv_filename = "data/ai_feyn/FeynmanEquations.csv"
+    parser = argparse.ArgumentParser(
+        description="Preprocess AI Feynman equations for evaluation",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Single-expression mode (process all equations, display info)
+  python %(prog)s
+  
+  # Single-expression mode with quiet output
+  python %(prog)s -q
+  
+  # Single-expression mode with file output
+  python %(prog)s -w
+  
+  # Single-expression mode with expression reordering
+  python %(prog)s -r -w
+  
+  # Multi-expression mode with 10k datapoints (default)
+  python %(prog)s --multi
+  
+  # Multi-expression mode with custom datapoints
+  python %(prog)s --multi --dps 100000
+  
+  # Multi-expression mode with reordering to reduce stack size
+  python %(prog)s --multi --reorder --dps 100000
+  
+  # Multi-expression mode with custom output path
+  python %(prog)s --multi --output data/custom/output.txt
+  
+  # Multi-expression mode with custom CSV input
+  python %(prog)s --multi --input data/custom/equations.csv --dps 50000
+        """,
+    )
 
-    # Check if we should create multi-expression file
-    if "--multi" in sys.argv or "-m" in sys.argv:
-        num_dps = 10000
-        output_path = None
+    # Input file
+    parser.add_argument(
+        "--input",
+        type=str,
+        default="data/ai_feyn/FeynmanEquations.csv",
+        help="Path to Feynman equations CSV file (default: data/ai_feyn/FeynmanEquations.csv)",
+    )
 
-        # Allow custom num_dps and output path
-        for arg in sys.argv:
-            if arg.startswith("--dps="):
-                num_dps = int(arg.split("=")[1])
-            elif arg.startswith("--output="):
-                output_path = arg.split("=", 1)[1]
+    # Mode selection
+    parser.add_argument(
+        "-m",
+        "--multi",
+        action="store_true",
+        help="Create multi-expression file instead of processing single equations",
+    )
+
+    # Expression optimization
+    parser.add_argument(
+        "-r",
+        "--reorder",
+        action="store_true",
+        help="Reorder expression tokens to reduce stack size to 4 (applicable to both modes)",
+    )
+
+    # Single-expression mode options
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Quiet mode: suppress detailed output (single-expression mode)",
+    )
+    parser.add_argument(
+        "-w",
+        "--write",
+        action="store_true",
+        help="Write output files (single-expression mode)",
+    )
+
+    # Multi-expression mode options
+    parser.add_argument(
+        "--dps",
+        type=int,
+        default=10000,
+        help="Number of datapoints per expression (multi-expression mode, default: 10000)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output file path (multi-expression mode, default: auto-generated)",
+    )
+
+    args = parser.parse_args()
+    # print(args)
+
+    # Multi-expression mode
+    if args.multi:
+        output_path = args.output
 
         # Auto-generate output path if not specified
         if output_path is None:
             # Format: input_100_10k.txt or input_100_100k.txt
-            if num_dps >= 1000:
-                dps_str = f"{num_dps // 1000}k"
+            if args.dps >= 1000:
+                dps_str = f"{args.dps // 1000}k"
             else:
-                dps_str = str(num_dps)
+                dps_str = str(args.dps)
             output_path = f"data/ai_feyn/multi/input_100_{dps_str}.txt"
 
-        create_multi_expression_file(digest_csv_filename, output_path, num_dps)
+        create_multi_expression_file(
+            args.input, output_path, args.dps, reorder=args.reorder
+        )
     else:
         # Original single-expression mode
-        quiet = "--quiet" in sys.argv or "-q" in sys.argv
-        write_output = "--write" in sys.argv or "-w" in sys.argv
-
-        main(digest_csv_filename, quiet=quiet, write_output=write_output)
+        main(
+            args.input,
+            quiet=args.quiet,
+            write_output=args.write,
+            reorder=args.reorder,
+        )
