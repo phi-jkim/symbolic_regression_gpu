@@ -93,7 +93,7 @@ __device__ double eval_op_gpu(int op, double val1, double val2)
 
 
 
-inline void stack_push(double *stk, double val)
+__device__ inline void static_stack_push(double *stk, double val, int &sp)
 {
     // stk[sp] = val;
     // sp++;
@@ -103,7 +103,7 @@ inline void stack_push(double *stk, double val)
     stk[0] = val;
 }
 
-inline double stack_pop(double *stk)
+__device__ inline double static_stack_pop(double *stk, int &sp)
 {
     // sp--;
     // return stk[sp];
@@ -112,6 +112,18 @@ inline double stack_pop(double *stk)
     for(int i=MAX_STACK_SIZE-2; i>=0; i--)
         stk[i] = stk[i+1];
     return val;
+}
+
+__device__ inline void dyn_stack_push(double *stk, double val, int &sp)
+{
+    stk[sp] = val;
+    sp++;
+}
+
+__device__ inline double dyn_stack_pop(double *stk, int &sp)
+{
+    sp--;
+    return stk[sp];
 }
 
 
@@ -128,24 +140,24 @@ __device__ double eval_tree_gpu(int *tokens, double *values, double *x, int num_
         if (tok > 0) // operation
         {
             // val1 = stk[sp - 1], sp--;
-            val1 = stack_pop(stk);
+            val1 = dyn_stack_pop(stk, sp);
             if (tok < 10) // binary operation (1-9)
                 // val2 = stk[sp - 1], sp--;
-                val2 = stack_pop(stk);
+                val2 = dyn_stack_pop(stk, sp);
 
             tmp = eval_op_gpu(tok, val1, val2);
             // stk[sp] = tmp, sp++;
-            stack_push(stk, tmp);
+            dyn_stack_push(stk, tmp, sp);
         }
         else if (tok == 0) // constant
         {
             // stk[sp] = values[i], sp++;
-            stack_push(stk, values[i]);
+            dyn_stack_push(stk, values[i], sp);
         }
         else if (tok == -1) // variable
         {
             // stk[sp] = x[(int)values[i]], sp++;
-            stack_push(stk, x[(int)values[i]]);
+            dyn_stack_push(stk, x[(int)values[i]], sp);
         }
     }
     return stk[0];
