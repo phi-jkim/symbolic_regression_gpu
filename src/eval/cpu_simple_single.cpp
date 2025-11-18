@@ -79,30 +79,52 @@ double eval_op(int op, double val1, double val2)
 }
 
 double stk[MAX_STACK_SIZE];
+int sp = 0;
+
+inline void stack_push(double *stk, double val)
+{
+    stk[sp] = val;
+    sp++;
+    // #pragma unroll
+    // for(int i=MAX_STACK_SIZE-2; i>=0; i--)
+    //     stk[i+1] = stk[i];
+    // stk[0] = val;
+}
+
+inline double stack_pop(double *stk)
+{
+    sp--;
+    return stk[sp];
+    // double val = stk[0];
+    // #pragma unroll
+    // for(int i=MAX_STACK_SIZE-2; i>=0; i--)
+    //     stk[i] = stk[i+1];
+    // return val;
+}
 
 double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int num_vars)
 {
-    int sp = 0;
+    sp = 0;
     double tmp, val1, val2;
     for (int i = num_tokens - 1; i >= 0; i--)
     {
         int tok = tokens[i];
         if (tok > 0) // operation
         {
-            val1 = stk[sp - 1], sp--;
+            val1 = stack_pop(stk);
             if (tok < 10) // binary operation (1-9)
-                val2 = stk[sp - 1], sp--;
+                val2 = stack_pop(stk);
 
             tmp = eval_op(tok, val1, val2);
-            stk[sp] = tmp, sp++;
+            stack_push(stk, tmp);
         }
         else if (tok == 0) // constant
         {
-            stk[sp] = values[i], sp++;
+            stack_push(stk, values[i]);
         }
         else if (tok == -1) // variable
         {
-            stk[sp] = x[(int)values[i]], sp++;
+            stack_push(stk, x[(int)values[i]]);
         }
         else
         {
