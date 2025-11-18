@@ -109,7 +109,7 @@ __device__ inline double static_stack_pop(double *stk, int &sp)
     // return stk[sp];
     double val = stk[0];
     #pragma unroll
-    for(int i=MAX_STACK_SIZE-2; i>=0; i--)
+    for(int i=0; i<=MAX_STACK_SIZE-2; i++)
         stk[i] = stk[i+1];
     return val;
 }

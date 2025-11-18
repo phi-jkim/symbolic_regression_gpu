@@ -85,27 +85,6 @@ double eval_op(int op, double val1, double val2)
     }
 }
 
-// inline void stack_push(double *stk, double val)
-// {
-//     // stk[sp] = val;
-//     // sp++;
-//     #pragma unroll
-//     for(int i=MAX_STACK_SIZE-2; i>=0; i--)
-//         stk[i+1] = stk[i];
-//     stk[0] = val;
-// }
-
-// inline double stack_pop(double *stk)
-// {
-//     // sp--;
-//     // return stk[sp];
-//     double val = stk[0];
-//     #pragma unroll
-//     for(int i=MAX_STACK_SIZE-2; i>=0; i--)
-//         stk[i] = stk[i+1];
-//     return val;
-// }
-
 double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int num_vars)
 {
     double stk[MAX_STACK_SIZE]; // Thread-local stack for thread safety
