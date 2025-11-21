@@ -146,6 +146,14 @@ InputInfo parse_input_info(const std::string &input_file)
     info.tokens = new int *[info.num_exprs];
     info.values = new double *[info.num_exprs];
     info.data_filenames = new std::string[info.num_exprs];
+    // Initialize optional packed buffers as null (allocated later on demand)
+    info.tokens_packed = nullptr;
+    info.values_packed_f32 = nullptr;
+    info.X_packed_f32 = nullptr;
+    // Initialize maxima
+    info.max_tokens = 0;
+    info.max_num_dps = 0;
+    info.max_num_features = 0;
 
     // Read each expression
     for (int expr_id = 0; expr_id < info.num_exprs; expr_id++)
@@ -154,6 +162,12 @@ InputInfo parse_input_info(const std::string &input_file)
         file >> info.num_vars[expr_id];
         file >> info.num_dps[expr_id];
         file >> info.num_tokens[expr_id];
+
+        // Update maxima as we parse
+        if (info.num_tokens[expr_id] > info.max_tokens) info.max_tokens = info.num_tokens[expr_id];
+        if (info.num_dps[expr_id] > info.max_num_dps) info.max_num_dps = info.num_dps[expr_id];
+        int nf = info.num_vars[expr_id] + 1;
+        if (nf > info.max_num_features) info.max_num_features = nf;
 
         // std::cout << "  Expression " << (expr_id + 1) << ": " << info.num_vars[expr_id]
         //           << " vars, " << info.num_dps[expr_id] << " dps, "
@@ -490,7 +504,51 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     }
 
     // ============================================
-    // PHASE 3: Evaluate (Total Eval Time)
+    // PHASE 3: Compute maxima and optional packing for GPU evaluator
+    // ============================================
+    // compute maxima across expressions for downstream alloc sizing
+
+    // Allocate arrays of pointers for packed buffers
+    input_info.tokens_packed = new int*[input_info.num_exprs];
+    input_info.values_packed_f32 = new float*[input_info.num_exprs];
+    input_info.X_packed_f32 = new float*[input_info.num_exprs];
+    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++) {
+        input_info.tokens_packed[expr_id] = nullptr;
+        input_info.values_packed_f32[expr_id] = nullptr;
+        input_info.X_packed_f32[expr_id] = nullptr;
+    }
+
+    // TODO: could do this step in parallel or omit and modify how expression data is stored 
+    // Build contiguous buffers
+    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++) {
+        const int num_tokens = input_info.num_tokens[expr_id];
+        const int num_vars = input_info.num_vars[expr_id];
+        const int num_dps = input_info.num_dps[expr_id];
+        const int num_features = num_vars + 1;
+
+        // tokens
+        int* tok_buf = new int[num_tokens];
+        for (int i = 0; i < num_tokens; ++i) tok_buf[i] = input_info.tokens[expr_id][i];
+        input_info.tokens_packed[expr_id] = tok_buf;
+
+        // values (double -> float)
+        float* val_buf = new float[num_tokens];
+        for (int i = 0; i < num_tokens; ++i) val_buf[i] = static_cast<float>(input_info.values[expr_id][i]);
+        input_info.values_packed_f32[expr_id] = val_buf;
+
+        // X row-major [dp, feature], convert double -> float
+        float* x_buf = new float[static_cast<size_t>(num_dps) * static_cast<size_t>(num_features)];
+        for (int dp = 0; dp < num_dps; ++dp) {
+            for (int f = 0; f < num_features; ++f) {
+                x_buf[static_cast<size_t>(dp) * static_cast<size_t>(num_features) + f] =
+                    static_cast<float>(all_vars[expr_id][f][dp]);
+            }
+        }
+        input_info.X_packed_f32[expr_id] = x_buf;
+    }
+
+    // ============================================
+    // PHASE 4: Evaluate (Total Eval Time)
     // BLACK BOX: CPU or GPU implementation
     // ============================================
     TimePoint eval_start = measure_clock();
@@ -595,6 +653,15 @@ void free_input_info(InputInfo &info)
             {
                 delete[] info.values[i];
             }
+            if (info.tokens_packed && info.tokens_packed[i] != nullptr) {
+                delete[] info.tokens_packed[i];
+            }
+            if (info.values_packed_f32 && info.values_packed_f32[i] != nullptr) {
+                delete[] info.values_packed_f32[i];
+            }
+            if (info.X_packed_f32 && info.X_packed_f32[i] != nullptr) {
+                delete[] info.X_packed_f32[i];
+            }
         }
 
         // Free arrays
@@ -604,6 +671,9 @@ void free_input_info(InputInfo &info)
         delete[] info.tokens;
         delete[] info.values;
         delete[] info.data_filenames;
+        if (info.tokens_packed) delete[] info.tokens_packed;
+        if (info.values_packed_f32) delete[] info.values_packed_f32;
+        if (info.X_packed_f32) delete[] info.X_packed_f32;
 
         info.num_exprs = 0;
     }

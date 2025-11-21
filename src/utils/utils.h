@@ -14,6 +14,17 @@ typedef struct {
     int **tokens;          // 2D array [expr_id][token_id]
     double **values;       // 2D array [expr_id][value_id]
     std::string *data_filenames; // Array of size num_exprs
+    // Precomputed maxima across expressions (computed outside of eval)
+    int max_tokens;         // max(num_tokens)
+    int max_num_dps;        // max(num_dps)
+    int max_num_features;   // max(num_vars + 1)
+    // Optional prepacked host buffers (if provided, evaluator will memcpy directly)
+    // tokens_packed[expr_id]: int[num_tokens[expr_id]]
+    // values_packed_f32[expr_id]: float[num_tokens[expr_id]]
+    // X_packed_f32[expr_id]: float[num_dps[expr_id] * (num_vars[expr_id] + 1)] in row-major [dp, feature]
+    int   **tokens_packed;        // nullable
+    float **values_packed_f32;    // nullable
+    float **X_packed_f32;         // nullable
 } InputInfo;
 
 // Single expression view (for compatibility with save_results)

@@ -117,6 +117,9 @@ double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int
 // Processes all expressions and fills prediction arrays
 void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions)
 {
+    // Sum of CPU evaluation time across expressions (ms)
+    double total_cpu_ms = 0.0;
+
     // Process each expression
     for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
     {
@@ -127,7 +130,10 @@ void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_pred
         double *values = input_info.values[expr_id];
         double **vars = all_vars[expr_id];
         double *pred = all_predictions[expr_id];
-        
+
+        // Sum only eval_tree_cpu time for this expression (exclude malloc/copies)
+        double expr_eval_ms = 0.0;
+
         // Evaluate all datapoints for this expression
         for (int dp = 0; dp < num_dps; dp++)
         {
@@ -135,11 +141,19 @@ void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_pred
             double *x = (double *)malloc((num_vars + 1) * sizeof(double));
             for (int i = 0; i <= num_vars; i++)
                 x[i] = vars[i][dp];
-            
-            // Evaluate and store prediction
-            pred[dp] = eval_tree_cpu(tokens, values, x, num_tokens, num_vars);
-            
+            // Time only the evaluator call
+            TimePoint t0 = measure_clock();
+            double y = eval_tree_cpu(tokens, values, x, num_tokens, num_vars);
+            expr_eval_ms += clock_to_ms(t0, measure_clock());
+
+            // Store prediction (not timed)
+            pred[dp] = y;
+
             free(x);
         }
+
+        total_cpu_ms += expr_eval_ms;
     }
+
+    std::cout << "CPU computation time (eval only): " << total_cpu_ms << " ms" << std::endl;
 }
