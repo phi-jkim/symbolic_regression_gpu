@@ -1,7 +1,14 @@
 #include <iostream>
 #include <string>
 #include <cmath>
+#include <thread>
+#include <vector>
 #include "../utils/utils.h"
+
+// Number of CPU worker threads (set via -DCPU_EVAL_THREADS=N at compile time)
+#ifndef CPU_EVAL_THREADS
+#define CPU_EVAL_THREADS 8
+#endif
 
 double eval_op(int op, double val1, double val2)
 {
@@ -78,44 +85,30 @@ double eval_op(int op, double val1, double val2)
     }
 }
 
-double stk[MAX_STACK_SIZE];
-int sp = 0;
-
-inline void stack_push(double *stk, double val)
-{
-    stk[sp] = val;
-    sp++;
-}
-
-inline double stack_pop(double *stk)
-{
-    sp--;
-    return stk[sp];
-}
-
 double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int num_vars)
 {
-    sp = 0;
+    double stk[MAX_STACK_SIZE]; // Thread-local stack for thread safety
+    int sp = 0;
     double tmp, val1, val2;
     for (int i = num_tokens - 1; i >= 0; i--)
     {
         int tok = tokens[i];
         if (tok > 0) // operation
         {
-            val1 = stack_pop(stk);
+            val1 = stk[sp - 1], sp--;
             if (tok < 10) // binary operation (1-9)
-                val2 = stack_pop(stk);
+                val2 = stk[sp - 1], sp--;
 
             tmp = eval_op(tok, val1, val2);
-            stack_push(stk, tmp);
+            stk[sp] = tmp, sp++;
         }
         else if (tok == 0) // constant
         {
-            stack_push(stk, values[i]);
+            stk[sp] = values[i], sp++;
         }
         else if (tok == -1) // variable
         {
-            stack_push(stk, x[(int)values[i]]);
+            stk[sp] = x[(int)values[i]], sp++;
         }
         else
         {
@@ -126,47 +119,50 @@ double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int
     return stk[0];
 }
 
-// Batch evaluation function for CPU
+// Batch evaluation function for CPU with configurable worker threads
 // Processes all expressions and fills prediction arrays
 void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions)
 {
-    // Sum of CPU evaluation time across expressions (ms)
-    double total_cpu_ms = 0.0;
+    const int num_workers = CPU_EVAL_THREADS;
+    std::vector<std::thread> threads;
 
-    // Process each expression
-    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
+    // Worker function: each thread processes expressions where expr_id % num_workers == worker_id
+    auto worker = [&](int worker_id)
     {
-        int num_vars = input_info.num_vars[expr_id];
-        int num_dps = input_info.num_dps[expr_id];
-        int num_tokens = input_info.num_tokens[expr_id];
-        int *tokens = input_info.tokens[expr_id];
-        double *values = input_info.values[expr_id];
-        double **vars = all_vars[expr_id];
-        double *pred = all_predictions[expr_id];
-
-        // Sum only eval_tree_cpu time for this expression (exclude malloc/copies)
-        double expr_eval_ms = 0.0;
-
-        // Evaluate all datapoints for this expression
-        for (int dp = 0; dp < num_dps; dp++)
+        double *x = (double *)malloc(MAX_VAR_NUM * sizeof(double));
+        for (int expr_id = worker_id; expr_id < input_info.num_exprs; expr_id += num_workers)
         {
-            // Prepare input variables for this datapoint
-            double *x = (double *)malloc(MAX_VAR_NUM * sizeof(double));
-            for (int i = 0; i <= num_vars; i++)
-                x[i] = vars[i][dp];
-            // Time only the evaluator call
-            TimePoint t0 = measure_clock();
-            double y = eval_tree_cpu(tokens, values, x, num_tokens, num_vars);
-            expr_eval_ms += clock_to_ms(t0, measure_clock());
+            int num_vars = input_info.num_vars[expr_id];
+            int num_dps = input_info.num_dps[expr_id];
+            int num_tokens = input_info.num_tokens[expr_id];
+            int *tokens = input_info.tokens[expr_id];
+            double *values = input_info.values[expr_id];
+            double **vars = all_vars[expr_id];
+            double *pred = all_predictions[expr_id];
 
-            // Store prediction (not timed)
-            pred[dp] = y;
+            // Evaluate all datapoints for this expression
+            for (int dp = 0; dp < num_dps; dp++)
+            {
+                // Prepare input variables for this datapoint
+                for (int i = 0; i <= num_vars; i++)
+                    x[i] = vars[i][dp];
 
-            free(x);
+                // Evaluate and store prediction
+                pred[dp] = eval_tree_cpu(tokens, values, x, num_tokens, num_vars);
+            }
         }
+        free(x); // Free the worker's temporary variable array
+    };
 
-        total_cpu_ms += expr_eval_ms;
+    // Launch worker threads
+    for (int i = 0; i < num_workers; i++)
+    {
+        threads.emplace_back(worker, i);
     }
 
-    std::cout << "CPU computation time (eval only): " << total_cpu_ms << " ms" << std::endl;
+    // Wait for all threads to complete
+    for (auto &t : threads)
+    {
+        t.join();
+    }
 }

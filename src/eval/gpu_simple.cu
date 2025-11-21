@@ -91,10 +91,46 @@ __device__ double eval_op_gpu(int op, double val1, double val2)
     }
 }
 
+
+
+__device__ inline void static_stack_push(double *stk, double val, int &sp)
+{
+    // stk[sp] = val;
+    // sp++;
+    #pragma unroll
+    for(int i=MAX_STACK_SIZE-2; i>=0; i--)
+        stk[i+1] = stk[i];
+    stk[0] = val;
+}
+
+__device__ inline double static_stack_pop(double *stk, int &sp)
+{
+    // sp--;
+    // return stk[sp];
+    double val = stk[0];
+    #pragma unroll
+    for(int i=0; i<=MAX_STACK_SIZE-2; i++)
+        stk[i] = stk[i+1];
+    return val;
+}
+
+__device__ inline void dyn_stack_push(double *stk, double val, int &sp)
+{
+    stk[sp] = val;
+    sp++;
+}
+
+__device__ inline double dyn_stack_pop(double *stk, int &sp)
+{
+    sp--;
+    return stk[sp];
+}
+
+
 // GPU version of eval_tree - each thread has its own stack
 __device__ double eval_tree_gpu(int *tokens, double *values, double *x, int num_tokens, int num_vars)
 {
-    double stk[128]; // Local stack per thread
+    double stk[MAX_STACK_SIZE]; // Local stack per thread
     int sp = 0;
     double tmp, val1, val2;
     
@@ -103,20 +139,25 @@ __device__ double eval_tree_gpu(int *tokens, double *values, double *x, int num_
         int tok = tokens[i];
         if (tok > 0) // operation
         {
-            val1 = stk[sp - 1], sp--;
+            // val1 = stk[sp - 1], sp--;
+            val1 = dyn_stack_pop(stk, sp);
             if (tok < 10) // binary operation (1-9)
-                val2 = stk[sp - 1], sp--;
+                // val2 = stk[sp - 1], sp--;
+                val2 = dyn_stack_pop(stk, sp);
 
             tmp = eval_op_gpu(tok, val1, val2);
-            stk[sp] = tmp, sp++;
+            // stk[sp] = tmp, sp++;
+            dyn_stack_push(stk, tmp, sp);
         }
         else if (tok == 0) // constant
         {
-            stk[sp] = values[i], sp++;
+            // stk[sp] = values[i], sp++;
+            dyn_stack_push(stk, values[i], sp);
         }
         else if (tok == -1) // variable
         {
-            stk[sp] = x[(int)values[i]], sp++;
+            // stk[sp] = x[(int)values[i]], sp++;
+            dyn_stack_push(stk, x[(int)values[i]], sp);
         }
     }
     return stk[0];
@@ -132,7 +173,7 @@ __global__ void eval_kernel(int *d_tokens, double *d_values,
     if (dp_idx < num_dps)
     {
         // Prepare input variables for this datapoint
-        double x[32]; // Max 32 variables (more than enough for Feynman)
+        double x[MAX_VAR_NUM]; // Max variables
         
         for (int i = 0; i <= num_vars; i++)
         {

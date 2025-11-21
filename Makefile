@@ -59,10 +59,12 @@ CXXFLAGS = -std=c++11 -O3 -Wall -pthread
 BUILD_DIR = build
 CPU_EVAL_BIN = $(BUILD_DIR)/cpu_eval
 UTILS_SRC = src/utils/utils.cpp
+UTILS_HDR = src/utils/utils.h
 MAIN_SRC = src/main.cpp
 CPU_EVAL_SRC = src/eval/cpu_simple_single.cpp
+EVALUATOR_HDR = src/eval/evaluator.h
 
-$(CPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(CPU_EVAL_SRC)
+$(CPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(CPU_EVAL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -DUSE_CPU_SIMPLE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_EVAL_SRC)
 
@@ -80,6 +82,34 @@ run_cpu_eval_sample: $(CPU_EVAL_BIN)
 
 # Default run target (single expression)
 run_cpu_eval: run_cpu_eval_single
+
+# ============================================================================
+# CPU Multi-threaded Evaluation Targets
+# ============================================================================
+CPU_MULTI_EVAL_BIN = $(BUILD_DIR)/cpu_multi_eval
+CPU_MULTI_EVAL_SRC = src/eval/cpu_simple_multi.cpp
+
+# Number of CPU worker threads (configurable at compile time)
+CPU_EVAL_THREADS ?= 8
+
+$(CPU_MULTI_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(CPU_MULTI_EVAL_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -DUSE_CPU_MULTI -DCPU_EVAL_THREADS=$(CPU_EVAL_THREADS) -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_MULTI_EVAL_SRC)
+
+# Test with single expression
+run_cpu_multi_eval_single: $(CPU_MULTI_EVAL_BIN)
+	$(CPU_MULTI_EVAL_BIN) data/ai_feyn/singles/input_001.txt
+
+# Test with multiple expressions
+run_cpu_multi_eval_multi: $(CPU_MULTI_EVAL_BIN)
+	$(CPU_MULTI_EVAL_BIN) data/ai_feyn/multi/input_100_100k.txt
+
+# Test with sample input (2 expressions, 1000 data points each)
+run_cpu_multi_eval_sample: $(CPU_MULTI_EVAL_BIN)
+	$(CPU_MULTI_EVAL_BIN) data/examples/sample_input.txt
+
+# Default run target (multi expression)
+run_cpu_multi_eval: run_cpu_multi_eval_multi
 
 # ============================================================================
 # GPU Evaluation Targets (for Feynman equation evaluation)
@@ -100,7 +130,7 @@ GPU_ARCH ?= sm_89
 NVCCFLAGS = -std=c++11 -O3 -arch=$(GPU_ARCH) \
 	-Wno-deprecated-gpu-targets
 
-$(GPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVAL_SRC)
+$(GPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_EVAL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_SIMPLE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVAL_SRC)
 
@@ -126,7 +156,7 @@ GPU_JINHA_BIN = $(BUILD_DIR)/gpu_jinha_eval
 GPU_JINHA_SRC = src/eval/gpu_simple_jinha.cu
 UTILS_CU_SRC = src/utils/utils.cu
 
-$(GPU_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_CU_SRC) $(GPU_JINHA_SRC)
+$(GPU_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_JINHA_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA -o $@ \
 		$(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_SRC) $(UTILS_CU_SRC)
@@ -163,7 +193,7 @@ compare_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN)
 GPU_ASYNC_JINHA_BIN = $(BUILD_DIR)/gpu_async_jinha_eval
 GPU_ASYNC_JINHA_SRC = src/eval/gpu_async_jinha.cu
 
-$(GPU_ASYNC_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_CU_SRC) $(GPU_ASYNC_JINHA_SRC)
+$(GPU_ASYNC_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_ASYNC_JINHA_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_ASYNC_JINHA -o $@ \
 		$(MAIN_SRC) $(UTILS_SRC) $(GPU_ASYNC_JINHA_SRC) $(UTILS_CU_SRC)
@@ -183,10 +213,13 @@ run_gpu_async_jinha_eval_sample: $(GPU_ASYNC_JINHA_BIN)
 # Default GPU Async Jinha run target
 run_gpu_async_jinha_eval: run_gpu_async_jinha_eval_sample
 
-# Compare all four implementations
-compare_all_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN) $(GPU_ASYNC_JINHA_BIN)
-	@echo "=== CPU Simple ==="
+# Compare all implementations
+compare_all_evals: $(CPU_EVAL_BIN) $(CPU_MULTI_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN) $(GPU_ASYNC_JINHA_BIN)
+	@echo "=== CPU Single-threaded ==="
 	@time $(CPU_EVAL_BIN) data/examples/sample_input.txt
+	@echo ""
+	@echo "=== CPU Multi-threaded ($(CPU_EVAL_THREADS) workers) ==="
+	@time $(CPU_MULTI_EVAL_BIN) data/examples/sample_input.txt
 	@echo ""
 	@echo "=== GPU Simple ==="
 	@time $(GPU_EVAL_BIN) data/examples/sample_input.txt
@@ -196,6 +229,52 @@ compare_all_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN) $(GPU_ASYNC_
 	@echo ""
 	@echo "=== GPU Async Jinha (double-buffer) ==="
 	@time $(GPU_ASYNC_JINHA_BIN) data/examples/sample_input.txt
+
+# ============================================================================
+# Data Generation
+# ============================================================================
+
+PREPROCESS_SCRIPT := src/script/preprocess_ai_feyn.py
+MULTI_DIR := data/ai_feyn/multi
+SINGLES_DIR := data/ai_feyn/singles
+
+.PHONY: data_gen data_gen_multi data_gen_singles
+
+# Generate all data files
+data_gen: data_gen_multi data_gen_singles
+	@echo ""
+	@echo "=========================================="
+	@echo "All data generation complete!"
+	@echo "=========================================="
+
+# Generate multi-expression files with different datapoint counts
+data_gen_multi:
+	@echo "=========================================="
+	@echo "Generating multi-expression files..."
+	@echo "=========================================="
+	@mkdir -p $(MULTI_DIR)
+	@echo ""
+	@echo "--- Generating 100_10k (10,000 datapoints) ---"
+	python $(PREPROCESS_SCRIPT) --multi --dps 10000
+	@echo ""
+	@echo "--- Generating 100_100k (100,000 datapoints) ---"
+	python $(PREPROCESS_SCRIPT) --multi --dps 100000
+	@echo ""
+	@echo "--- Generating 100_1000k (1,000,000 datapoints) ---"
+	python $(PREPROCESS_SCRIPT) --multi --dps 1000000
+	@echo ""
+	@echo "Multi-expression files generated in $(MULTI_DIR)"
+
+# Generate all single-expression files
+data_gen_singles:
+	@echo ""
+	@echo "=========================================="
+	@echo "Generating single-expression files..."
+	@echo "=========================================="
+	@mkdir -p $(SINGLES_DIR)
+	python $(PREPROCESS_SCRIPT) --write --quiet
+	@echo ""
+	@echo "Single-expression files generated in $(SINGLES_DIR)"
 
 # ============================================================================
 

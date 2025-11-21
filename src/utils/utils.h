@@ -5,6 +5,21 @@
 #include <vector>
 #include <chrono>
 
+// ============================================================================
+// Common Constants
+// ============================================================================
+
+// Maximum number of variables (input features) per expression
+#define MAX_VAR_NUM 32
+
+// Stack size for expression evaluation (all current expressions use < 16)
+#define MAX_STACK_SIZE 16
+
+// Maximum number of tokens per expression
+#define MAX_TOKEN_NUM 64
+
+// ============================================================================
+
 // Input information structure (supports 1 or more expressions)
 typedef struct {
     int num_exprs;
