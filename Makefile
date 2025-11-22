@@ -185,6 +185,33 @@ run_gpu_jinha_eval_sample: $(GPU_JINHA_BIN)
 # Default GPU Jinha run target
 run_gpu_jinha_eval: run_gpu_jinha_eval_sample
 
+# ============================================================================
+# GPU Evolve Jinha Evaluation (experimental, uses gpu_simple_jinha_with_evolve.cu)
+# ============================================================================
+GPU_EVOLVE_JINHA_BIN = $(BUILD_DIR)/gpu_evolve_jinha_eval
+GPU_EVOLVE_JINHA_SRC = src/eval/gpu_simple_jinha_with_evolve.cu
+EVOLVE_KERNEL_SRC = src/utils/generate.cu src/utils/mutation.cu src/utils/crossover.cu
+
+$(GPU_EVOLVE_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_EVOLVE_JINHA_SRC) $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_EVOLVE_JINHA -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_EVOLVE_JINHA_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC)
+
+# Test with single expression
+run_gpu_evolve_jinha_eval_single: $(GPU_EVOLVE_JINHA_BIN)
+	$(GPU_EVOLVE_JINHA_BIN) data/ai_feyn/singles/input_001.txt
+
+# Test with multiple expressions
+run_gpu_evolve_jinha_eval_multi: $(GPU_EVOLVE_JINHA_BIN)
+	$(GPU_EVOLVE_JINHA_BIN) data/ai_feyn/multi/input_100_100k.txt
+
+# Test with sample input (2 expressions, 1000 data points each)
+run_gpu_evolve_jinha_eval_sample: $(GPU_EVOLVE_JINHA_BIN)
+	$(GPU_EVOLVE_JINHA_BIN) data/examples/sample_input.txt
+
+# Default GPU Evolve Jinha run target
+run_gpu_evolve_jinha_eval: run_gpu_evolve_jinha_eval_sample
+
 # Compare all three implementations
 compare_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN)
 	@echo "=== CPU Simple ==="
@@ -300,6 +327,19 @@ data_gen_mutations:
 
 # ============================================================================
 
+# Test target for evolution
+TEST_EVOLVE_BIN = evolution_tests
+TEST_EVOLVE_SRC = src/test/evolution_tests.cpp
+KERNEL_SRC = src/utils/generate.cu src/utils/mutation.cu src/utils/crossover.cu
+
+$(TEST_EVOLVE_BIN): $(TEST_EVOLVE_SRC) $(KERNEL_SRC)
+	$(NVCC) $(NVFLAGS) -I./src/utils -o $@ $(TEST_EVOLVE_SRC) $(KERNEL_SRC)
+
+run_test_evolve: $(TEST_EVOLVE_BIN)
+	./$(TEST_EVOLVE_BIN)
+
 clean:
-	rm -f $(TARGET) run_gpu $(TEST_BIN) $(BENCH_BIN)
+	rm -f $(TARGET) run_gpu $(TEST_BIN) $(BENCH_BIN) $(TEST_EVOLVE_BIN)
 	rm -rf $(BUILD_DIR)
+
+.PHONY: all test run_bench run_test_evolve

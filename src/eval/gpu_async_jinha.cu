@@ -3,7 +3,7 @@
 #include <vector>
 #include "../utils/utils.h"
 
-// Import eval_tree_gpu_async from utils.cu
+// Forward declaration to match utils.cu new async launcher (with defaults)
 extern "C" void eval_tree_gpu_async(
     const int* tokens,
     const float* values,
@@ -12,8 +12,8 @@ extern "C" void eval_tree_gpu_async(
     int num_features,
     int dataPoints,
     float* out_dev,
-    int blocks_y,
-    int threads
+    int blocks = 256,
+    int threads = 64
 );
 
 #define CUDA_CHECK(call) \
@@ -52,6 +52,9 @@ void eval_async_jinha_batch(InputInfo &input_info, double ***all_vars, double **
         }
         g_warned_about_sm = true;
     }
+    // Accumulate GPU kernel time (ms) over all expressions
+    float total_gpu_ms = 0.0f;
+
     for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
     {
         int num_vars = input_info.num_vars[expr_id];
@@ -114,16 +117,29 @@ void eval_async_jinha_batch(InputInfo &input_info, double ***all_vars, double **
                              X_flat.size() * sizeof(float), cudaMemcpyHostToDevice));
         
         // ============================================
-        // Step 6: Call async double-buffer kernel
+        // Step 6: Call async double-buffer kernel (timed)
         // ============================================
-        int threads = 256;
-        int blocks_y = (num_dps + threads - 1) / threads;
-        
-        eval_tree_gpu_async(d_tokens, d_values, d_X, 
+        cudaEvent_t ev_start, ev_stop;
+        CUDA_CHECK(cudaEventCreate(&ev_start));
+        CUDA_CHECK(cudaEventCreate(&ev_stop));
+
+        CUDA_CHECK(cudaEventRecord(ev_start));
+
+        eval_tree_gpu_async(d_tokens, d_values, d_X,
                            num_tokens, num_features, num_dps,
-                           d_out, blocks_y, threads);
-        
+                           d_out, /*blocks_hint*/0, /*threads_hint*/64);
+
+        // Ensure kernel completion before stopping timer
         CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaEventRecord(ev_stop));
+        CUDA_CHECK(cudaEventSynchronize(ev_stop));
+
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, ev_start, ev_stop));
+        total_gpu_ms += ms;
+
+        CUDA_CHECK(cudaEventDestroy(ev_start));
+        CUDA_CHECK(cudaEventDestroy(ev_stop));
         
         // ============================================
         // Step 7: Copy results back and convert float -> double
@@ -144,4 +160,7 @@ void eval_async_jinha_batch(InputInfo &input_info, double ***all_vars, double **
         CUDA_CHECK(cudaFree(d_X));
         CUDA_CHECK(cudaFree(d_out));
     }
+
+    // Print summed GPU kernel time across the population
+    std::cout << "GPU computation time (kernels only): " << total_gpu_ms << " ms" << std::endl;
 }
