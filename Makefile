@@ -3,9 +3,18 @@
 NVCC = nvcc
 # Target NVIDIA L40S (Ada, SM 89). Embed PTX for forward-compat JIT.
 # Use GCC 12 for NVCC to avoid compatibility issues with GCC 13+
+
+# Adjust -arch based on your GPU:
+# - sm_60: Pascal (GTX 10 series, Tesla P100)
+# - sm_70: Volta (Tesla V100)
+# - sm_75: Turing (RTX 20 series, Tesla T4)
+# - sm_80: Ampere (RTX 30 series, A100)
+# - sm_86: RTX 3090
+# - sm_89: RTX 4090, L40S
+GPU_ARCH ?= sm_89
+
 NVFLAGS ?= -O3 \
-  -gencode arch=compute_89,code=sm_89 \
-  -gencode arch=compute_89,code=compute_89 \
+  -arch=$(GPU_ARCH) \
   -Wno-deprecated-gpu-targets
 TARGET := libevaltree.so
 SRC := eval_tree.cu
@@ -121,14 +130,6 @@ run_cpu_multi_eval: run_cpu_multi_eval_multi
 GPU_EVAL_BIN = $(BUILD_DIR)/gpu_eval
 GPU_EVAL_SRC = src/eval/gpu_simple.cu
 
-# Adjust -arch based on your GPU:
-# - sm_60: Pascal (GTX 10 series, Tesla P100)
-# - sm_70: Volta (Tesla V100)
-# - sm_75: Turing (RTX 20 series, Tesla T4)
-# - sm_80: Ampere (RTX 30 series, A100)
-# - sm_86: RTX 3090
-# - sm_89: RTX 4090, L40S
-GPU_ARCH ?= sm_89
 # Use GCC 12 for NVCC to avoid compatibility issues with GCC 13+
 # Suppress deprecated GPU target warnings
 NVCCFLAGS = -std=c++11 -O3 -arch=$(GPU_ARCH) \
@@ -144,11 +145,15 @@ run_gpu_eval_single: $(GPU_EVAL_BIN)
 
 # Test with multiple expressions
 run_gpu_eval_multi: $(GPU_EVAL_BIN)
-	$(GPU_EVAL_BIN) data/ai_feyn/multi/input_100_100k.txt
+	$(GPU_EVAL_BIN) data/ai_feyn/multi/input_100_1000k.txt
 
 # Test with sample input (2 expressions, 1000 data points each)
 run_gpu_eval_sample: $(GPU_EVAL_BIN)
 	$(GPU_EVAL_BIN) data/examples/sample_input.txt
+
+# Test with mutation file (100 mutations, shared data)
+run_gpu_eval_mutations: $(GPU_EVAL_BIN)
+	$(GPU_EVAL_BIN) data/ai_feyn/mutations/input_base056_100mut_1000k.txt
 
 # Default GPU run target (multi expression)
 run_gpu_eval: run_gpu_eval_multi
@@ -289,6 +294,7 @@ data_gen_mutations:
 	@echo "=========================================="
 	@mkdir -p $(MUTATIONS_DIR)
 	python $(PREPROCESS_SCRIPT) --mutation
+	python $(PREPROCESS_SCRIPT) --mutation --dps 1000000
 	@echo ""
 	@echo "Mutation files generated in $(MUTATIONS_DIR)"
 

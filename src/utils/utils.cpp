@@ -362,12 +362,22 @@ ResultInfo make_result_info(double *pred, double **vars, int num_vars, int num_d
 
     result.mse = sum_squared_error / num_dps;
 
-    // Calculate median
-    std::vector<double> sorted_diffs = diffs;
-    std::sort(sorted_diffs.begin(), sorted_diffs.end());
-    result.median = (num_dps % 2 == 0)
-                        ? (sorted_diffs[num_dps / 2 - 1] + sorted_diffs[num_dps / 2]) / 2.0
-                        : sorted_diffs[num_dps / 2];
+    // Calculate median using nth_element (O(N) instead of O(N log N))
+    if (num_dps % 2 == 0)
+    {
+        // Even: need two middle elements
+        std::nth_element(diffs.begin(), diffs.begin() + num_dps / 2 - 1, diffs.end());
+        double lower = diffs[num_dps / 2 - 1];
+        std::nth_element(diffs.begin(), diffs.begin() + num_dps / 2, diffs.end());
+        double upper = diffs[num_dps / 2];
+        result.median = (lower + upper) / 2.0;
+    }
+    else
+    {
+        // Odd: single middle element
+        std::nth_element(diffs.begin(), diffs.begin() + num_dps / 2, diffs.end());
+        result.median = diffs[num_dps / 2];
+    }
 
     // Calculate standard deviation
     double mean_diff = 0.0;
@@ -556,7 +566,7 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     double total_eval_time = clock_to_ms(eval_start, measure_clock());
 
     // ============================================
-    // PHASE 4: Calculate statistics per expression
+    // PHASE 4: Calculate statistics per expression (parallel with 8 workers)
     // ============================================
     AggregatedResults agg_results;
     agg_results.num_exprs = input_info.num_exprs;
@@ -564,27 +574,51 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     agg_results.median_values = new double[agg_results.num_exprs];
     agg_results.stdev_values = new double[agg_results.num_exprs];
 
-    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
+    // Parallel stats computation with 8 worker threads
+    std::atomic<int> next_expr(0);
+    std::vector<std::thread> workers;
+    const int num_workers = 8;
+
+    auto worker = [&]()
     {
-        int num_vars = input_info.num_vars[expr_id];
-        int num_dps = input_info.num_dps[expr_id];
+        while (true)
+        {
+            int expr_id = next_expr.fetch_add(1);
+            if (expr_id >= input_info.num_exprs)
+                break;
 
-        ResultInfo result_info = make_result_info(
-            all_predictions[expr_id],
-            all_vars[expr_id],
-            num_vars,
-            num_dps,
-            0.0, // No per-expr init time
-            0.0, // No per-expr eval time
-            0.0);
+            int num_vars = input_info.num_vars[expr_id];
+            int num_dps = input_info.num_dps[expr_id];
 
-        agg_results.mse_values[expr_id] = result_info.mse;
-        agg_results.median_values[expr_id] = result_info.median;
-        agg_results.stdev_values[expr_id] = result_info.stdev;
+            ResultInfo result_info = make_result_info(
+                all_predictions[expr_id],
+                all_vars[expr_id],
+                num_vars,
+                num_dps,
+                0.0, // No per-expr init time
+                0.0, // No per-expr eval time
+                0.0);
 
-        // Don't free pred pointer - it's owned by all_predictions array
-        result_info.pred = nullptr;
-        free_result_info(result_info);
+            agg_results.mse_values[expr_id] = result_info.mse;
+            agg_results.median_values[expr_id] = result_info.median;
+            agg_results.stdev_values[expr_id] = result_info.stdev;
+
+            // Don't free pred pointer - it's owned by all_predictions array
+            result_info.pred = nullptr;
+            free_result_info(result_info);
+        }
+    };
+
+    // Launch worker threads
+    for (int i = 0; i < num_workers; i++)
+    {
+        workers.emplace_back(worker);
+    }
+
+    // Wait for all workers to complete
+    for (auto &t : workers)
+    {
+        t.join();
     }
 
     // ============================================
