@@ -11,6 +11,10 @@
     // GPU async double-buffer evaluation (defined in gpu_async_jinha.cu)
     void eval_async_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);
     #define eval_batch eval_async_jinha_batch
+#elif defined(USE_GPU_EVOLVE_JINHA)
+    // GPU evolution-based evaluation using evolve() (defined in gpu_simple_jinha_with_evolve.cu)
+    void eval_evolve_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);
+    #define eval_batch eval_evolve_jinha_batch
 #elif defined(USE_GPU_JINHA)
     // GPU evaluation using eval_tree.cu library (defined in gpu_simple_jinha.cu)
     void eval_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);

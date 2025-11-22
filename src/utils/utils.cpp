@@ -42,12 +42,14 @@
  */
 
 #include "utils.h"
+#include "opcodes.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <random>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <thread>
@@ -698,5 +700,338 @@ void free_data(double **vars, int num_vars)
             }
         }
         free(vars);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Evolution helpers
+// ----------------------------------------------------------------------------
+namespace
+{
+    using TokenVec = std::vector<int>;
+    using ValueVec = std::vector<float>;
+
+    constexpr int kUnaryOps[] = {
+        OP_SIN, OP_COS, OP_TAN, OP_SINH, OP_COSH, OP_TANH,
+        OP_EXP, OP_LOG, OP_INV, OP_ASIN, OP_ACOS, OP_ATAN,
+        OP_LOOSE_LOG, OP_LOOSE_INV, OP_ABS, OP_NEG, OP_SQRT, OP_LOOSE_SQRT
+    };
+
+    constexpr int kBinaryOps[] = {
+        OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_POW,
+        OP_MIN, OP_MAX, OP_LOOSE_DIV, OP_LOOSE_POW
+    };
+
+    std::mt19937& global_rng()
+    {
+        static thread_local std::mt19937 rng(std::random_device{}());
+        return rng;
+    }
+
+    float rand_uniform(float lo, float hi)
+    {
+        std::uniform_real_distribution<float> dist(lo, hi);
+        return dist(global_rng());
+    }
+
+    int rand_int(int inclusive_lo, int inclusive_hi)
+    {
+        if (inclusive_hi <= inclusive_lo)
+            return inclusive_lo;
+        std::uniform_int_distribution<int> dist(inclusive_lo, inclusive_hi);
+        return dist(global_rng());
+    }
+
+    template <typename T, size_t N>
+    T random_from(const T (&arr)[N])
+    {
+        return arr[rand_int(0, static_cast<int>(N) - 1)];
+    }
+
+    struct BuildContext
+    {
+        const EvolutionParams& params;
+        int tokens_left;
+        TokenVec* tokens;
+        ValueVec* values;
+        int num_vars;
+    };
+
+    void emit_leaf(BuildContext& ctx)
+    {
+        if (ctx.tokens_left <= 0)
+            return;
+
+        bool choose_const = rand_uniform(0.0f, 1.0f) < ctx.params.prob_const_leaf;
+        if (ctx.num_vars <= 0)
+            choose_const = true;
+
+        if (choose_const)
+        {
+            ctx.tokens->push_back(TOK_CONST);
+            ctx.values->push_back(rand_uniform(ctx.params.const_min, ctx.params.const_max));
+        }
+        else
+        {
+            int var_idx = rand_int(0, ctx.num_vars - 1);
+            ctx.tokens->push_back(TOK_VAR);
+            ctx.values->push_back(static_cast<float>(var_idx));
+        }
+        ctx.tokens_left -= 1;
+    }
+
+    void build_node(BuildContext& ctx, int depth)
+    {
+        if (ctx.tokens_left <= 0)
+            return;
+
+        bool max_depth_reached = depth >= ctx.params.max_depth;
+        bool must_leaf = max_depth_reached || ctx.tokens_left == 1;
+
+        if (!must_leaf)
+        {
+            bool force_leaf = rand_uniform(0.0f, 1.0f) < ctx.params.prob_leaf;
+            if (force_leaf)
+                must_leaf = true;
+        }
+
+        if (must_leaf)
+        {
+            emit_leaf(ctx);
+            return;
+        }
+
+        bool allow_unary = ctx.tokens_left >= 2;
+        bool allow_binary = ctx.tokens_left >= 3;
+
+        int arity = 0;
+        int op = TOK_CONST;
+
+        if (!allow_unary && !allow_binary)
+        {
+            emit_leaf(ctx);
+            return;
+        }
+
+        float unary_thresh = ctx.params.prob_unary;
+        if (!allow_unary)
+            unary_thresh = 0.0f;
+        if (!allow_binary)
+            unary_thresh = 1.0f;
+
+        bool pick_unary = rand_uniform(0.0f, 1.0f) < unary_thresh;
+        if (pick_unary)
+        {
+            op = random_from(kUnaryOps);
+            arity = 1;
+        }
+        else
+        {
+            op = random_from(kBinaryOps);
+            arity = 2;
+        }
+
+        ctx.tokens->push_back(op);
+        ctx.values->push_back(0.0f);
+        ctx.tokens_left -= 1;
+
+        for (int i = 0; i < arity; ++i)
+        {
+            if (ctx.tokens_left <= 0)
+            {
+                // fallback: ensure missing children become leaves if budget exhausted
+                ctx.tokens->push_back(TOK_VAR);
+                ctx.values->push_back(0.0f);
+                continue;
+            }
+            build_node(ctx, depth + 1);
+        }
+    }
+
+    void generate_with_limit(const EvolutionParams& params, int max_tokens,
+                              TokenVec& tokens_out, ValueVec& values_out)
+    {
+        tokens_out.clear();
+        values_out.clear();
+        if (max_tokens <= 0)
+            return;
+
+        tokens_out.reserve(max_tokens);
+        values_out.reserve(max_tokens);
+
+        EvolutionParams tuned = params;
+        tuned.max_tokens = std::min(params.max_tokens, max_tokens);
+
+        BuildContext ctx{tuned, tuned.max_tokens, &tokens_out, &values_out, std::max(1, tuned.num_vars)};
+        build_node(ctx, 0);
+
+        if (tokens_out.empty())
+        {
+            tokens_out.push_back(TOK_CONST);
+            values_out.push_back(0.0f);
+        }
+    }
+
+    int subtree_size(const TokenVec& tokens, int start)
+    {
+        if (start < 0 || start >= static_cast<int>(tokens.size()))
+            return 0;
+        int token = tokens[start];
+        int arity = (token == TOK_CONST || token == TOK_VAR) ? 0 : op_arity(token);
+        int consumed = 1;
+        int cursor = start + 1;
+        for (int i = 0; i < arity; ++i)
+        {
+            if (cursor >= static_cast<int>(tokens.size()))
+                break;
+            int child = subtree_size(tokens, cursor);
+            if (child <= 0)
+                break;
+            consumed += child;
+            cursor += child;
+        }
+        return consumed;
+    }
+
+    int random_node_index(const TokenVec& tokens)
+    {
+        if (tokens.empty())
+            return -1;
+        return rand_int(0, static_cast<int>(tokens.size()) - 1);
+    }
+
+    void splice_subtree(const TokenVec& src_tokens, const ValueVec& src_values,
+                        int begin, int count,
+                        TokenVec& dst_tokens, ValueVec& dst_values,
+                        const TokenVec& insert_tokens, const ValueVec& insert_values)
+    {
+        dst_tokens.insert(dst_tokens.end(), src_tokens.begin(), src_tokens.end());
+        dst_values.insert(dst_values.end(), src_values.begin(), src_values.end());
+
+        if (count <= 0)
+            return;
+
+        dst_tokens.erase(dst_tokens.begin() + begin, dst_tokens.begin() + begin + count);
+        dst_values.erase(dst_values.begin() + begin, dst_values.begin() + begin + count);
+        dst_tokens.insert(dst_tokens.begin() + begin, insert_tokens.begin(), insert_tokens.end());
+        dst_values.insert(dst_values.begin() + begin, insert_values.begin(), insert_values.end());
+    }
+}
+
+void generate_random_expression(const EvolutionParams& params,
+                                std::vector<int>& tokens_out,
+                                std::vector<float>& values_out)
+{
+    generate_with_limit(params, params.max_tokens, tokens_out, values_out);
+}
+
+void mutate_expression(const EvolutionParams& params,
+                       const std::vector<int>& parent_tokens,
+                       const std::vector<float>& parent_values,
+                       std::vector<int>& child_tokens,
+                       std::vector<float>& child_values)
+{
+    if (parent_tokens.empty())
+    {
+        generate_random_expression(params, child_tokens, child_values);
+        return;
+    }
+
+    int replace_idx = random_node_index(parent_tokens);
+    if (replace_idx < 0)
+    {
+        child_tokens = parent_tokens;
+        child_values = parent_values;
+        return;
+    }
+
+    int old_subtree = subtree_size(parent_tokens, replace_idx);
+    if (old_subtree <= 0)
+        old_subtree = 1;
+
+    int base_tokens = static_cast<int>(parent_tokens.size()) - old_subtree;
+    int max_new_tokens = params.max_tokens - base_tokens;
+    if (max_new_tokens <= 0)
+    {
+        child_tokens = parent_tokens;
+        child_values = parent_values;
+        return;
+    }
+
+    std::vector<int> new_tokens;
+    std::vector<float> new_values;
+    generate_with_limit(params, max_new_tokens, new_tokens, new_values);
+
+    child_tokens.clear();
+    child_values.clear();
+    splice_subtree(parent_tokens, parent_values, replace_idx, old_subtree,
+                   child_tokens, child_values, new_tokens, new_values);
+}
+
+void crossover_expressions(const EvolutionParams& params,
+                           const std::vector<int>& left_tokens,
+                           const std::vector<float>& left_values,
+                           const std::vector<int>& right_tokens,
+                           const std::vector<float>& right_values,
+                           std::vector<int>& child_tokens,
+                           std::vector<float>& child_values)
+{
+    if (left_tokens.empty() || right_tokens.empty())
+    {
+        child_tokens = left_tokens;
+        child_values = left_values;
+        return;
+    }
+
+    int left_idx = random_node_index(left_tokens);
+    if (left_idx < 0)
+    {
+        child_tokens = left_tokens;
+        child_values = left_values;
+        return;
+    }
+
+    int left_subtree = subtree_size(left_tokens, left_idx);
+    if (left_subtree <= 0)
+        left_subtree = 1;
+
+    bool replaced = false;
+    TokenVec candidate_tokens;
+    ValueVec candidate_values;
+    const int attempts = std::min<int>(static_cast<int>(right_tokens.size()), 32);
+    for (int attempt = 0; attempt < attempts; ++attempt)
+    {
+        int right_idx = random_node_index(right_tokens);
+        if (right_idx < 0)
+            continue;
+        int right_subtree = subtree_size(right_tokens, right_idx);
+        if (right_subtree <= 0)
+            continue;
+
+        int total = static_cast<int>(left_tokens.size()) - left_subtree + right_subtree;
+        if (total > params.max_tokens)
+            continue;
+
+        candidate_tokens.clear();
+        candidate_values.clear();
+        candidate_tokens.insert(candidate_tokens.end(),
+                                right_tokens.begin() + right_idx,
+                                right_tokens.begin() + right_idx + right_subtree);
+        candidate_values.insert(candidate_values.end(),
+                                right_values.begin() + right_idx,
+                                right_values.begin() + right_idx + right_subtree);
+
+        child_tokens.clear();
+        child_values.clear();
+        splice_subtree(left_tokens, left_values, left_idx, left_subtree,
+                       child_tokens, child_values, candidate_tokens, candidate_values);
+        replaced = true;
+        break;
+    }
+
+    if (!replaced)
+    {
+        child_tokens = left_tokens;
+        child_values = left_values;
     }
 }

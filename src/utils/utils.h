@@ -123,4 +123,40 @@ void free_aggregated_results(AggregatedResults& results);
 void free_input_info(InputInfo& info);
 void free_data(double** vars, int num_vars);
 
+// ----------------------------------------------------------------------------
+// Evolution helpers (single-expression tree ops)
+// ----------------------------------------------------------------------------
+
+struct EvolutionParams {
+    int num_vars = 1;            // number of input variables (excludes output column)
+    int max_tokens = MAX_TOKEN_NUM;
+    int max_depth = 5;
+    float const_min = -5.0f;
+    float const_max = 5.0f;
+    float prob_leaf = 0.1f;      // extra probability to terminate early (in addition to depth cap)
+    float prob_const_leaf = 0.5f;
+    float prob_unary = 0.35f;    // probability of picking a unary op vs binary
+};
+
+// Generate a random prefix expression within the provided constraints.
+void generate_random_expression(const EvolutionParams& params,
+                                std::vector<int>& tokens_out,
+                                std::vector<float>& values_out);
+
+// Replace a random subtree with a freshly generated subtree (mutation).
+void mutate_expression(const EvolutionParams& params,
+                       const std::vector<int>& parent_tokens,
+                       const std::vector<float>& parent_values,
+                       std::vector<int>& child_tokens,
+                       std::vector<float>& child_values);
+
+// Swap a random subtree from the left tree with one sampled from the right tree.
+void crossover_expressions(const EvolutionParams& params,
+                           const std::vector<int>& left_tokens,
+                           const std::vector<float>& left_values,
+                           const std::vector<int>& right_tokens,
+                           const std::vector<float>& right_values,
+                           std::vector<int>& child_tokens,
+                           std::vector<float>& child_values);
+
 #endif

@@ -95,11 +95,6 @@ void eval_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_pr
             values_host_ptr = values_temp.data();
         }
         
-        // ============================================
-        // Step 3: Transpose and convert data layout
-        // From: all_vars[expr_id][var_id][dp] (column-major, double)
-        // To:   X_flat[dp * num_features + var_id] (row-major, float)
-        // ============================================
         const float* X_host_ptr = nullptr;
         std::vector<float> X_temp;
         if (input_info.X_packed_f32 && input_info.X_packed_f32[expr_id]) {

@@ -179,7 +179,6 @@ extern "C" void eval_tree_gpu_batch(const int* tokens,
     if (threads <= 0) threads = 256;
     if (blocks  <= 0) blocks  = (dataPoints + threads - 1) / threads;
     // datapoints 
-    printf("eval_tree_gpu_batch: dataPoints=%d, threads=%d, blocks=%d\n", dataPoints, threads, blocks);
     eval_prefix_kernel_batch<<<blocks, threads>>>(tokens, values, X, len, num_features, dataPoints, out_dev);
 }
 
