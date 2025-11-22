@@ -239,6 +239,33 @@ void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_pred
     float total_kernel_time = 0.0f;
     float total_d2h_time = 0.0f;
     
+    // Optimization: If shared data, transfer once and reuse
+    double *d_vars_flat_shared = nullptr;
+    double *h_vars_flat_shared = nullptr;
+    
+    if (input_info.has_shared_data)
+    {
+        std::cout << "GPU: Using shared data optimization" << std::endl;
+        
+        int num_vars = input_info.num_vars[0];
+        int num_dps = input_info.num_dps[0];
+        double **vars = all_vars[0];
+        
+        // Allocate and transfer shared data once
+        CUDA_CHECK(cudaMalloc(&d_vars_flat_shared, (num_vars + 1) * num_dps * sizeof(double)));
+        h_vars_flat_shared = flatten_vars(vars, num_vars, num_dps);
+        
+        GPUTimer h2d_timer;
+        h2d_timer.start();
+        CUDA_CHECK(cudaMemcpy(d_vars_flat_shared, h_vars_flat_shared, 
+                              (num_vars + 1) * num_dps * sizeof(double), 
+                              cudaMemcpyHostToDevice));
+        float h2d_time = h2d_timer.stop();
+        total_h2d_time += h2d_time;
+        
+        std::cout << "  Shared data transferred: " << h2d_time << " ms" << std::endl;
+    }
+    
     // Process each expression
     for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
     {
@@ -247,29 +274,48 @@ void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_pred
         int num_tokens = input_info.num_tokens[expr_id];
         int *tokens = input_info.tokens[expr_id];
         double *values = input_info.values[expr_id];
-        double **vars = all_vars[expr_id];
         double *pred = all_predictions[expr_id];
         
-        // Allocate GPU memory
+        // Allocate GPU memory for tokens, values, and predictions
         int *d_tokens;
-        double *d_values, *d_vars_flat, *d_pred;
+        double *d_values, *d_pred;
         
         CUDA_CHECK(cudaMalloc(&d_tokens, num_tokens * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_values, num_tokens * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_vars_flat, (num_vars + 1) * num_dps * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_pred, num_dps * sizeof(double)));
         
-        // Flatten vars for GPU transfer
-        double *h_vars_flat = flatten_vars(vars, num_vars, num_dps);
-        
-        // Transfer to GPU (H2D)
+        // Transfer tokens and values (H2D)
         GPUTimer h2d_timer;
         h2d_timer.start();
         CUDA_CHECK(cudaMemcpy(d_tokens, tokens, num_tokens * sizeof(int), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_values, values, num_tokens * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_vars_flat, h_vars_flat, (num_vars + 1) * num_dps * sizeof(double), cudaMemcpyHostToDevice));
         float h2d_time = h2d_timer.stop();
         total_h2d_time += h2d_time;
+        
+        // Handle data: use shared or allocate per-expression
+        double *d_vars_flat;
+        double *h_vars_flat = nullptr;
+        
+        if (input_info.has_shared_data)
+        {
+            // Reuse shared data
+            d_vars_flat = d_vars_flat_shared;
+        }
+        else
+        {
+            // Allocate and transfer per-expression data
+            double **vars = all_vars[expr_id];
+            CUDA_CHECK(cudaMalloc(&d_vars_flat, (num_vars + 1) * num_dps * sizeof(double)));
+            h_vars_flat = flatten_vars(vars, num_vars, num_dps);
+            
+            GPUTimer data_h2d_timer;
+            data_h2d_timer.start();
+            CUDA_CHECK(cudaMemcpy(d_vars_flat, h_vars_flat, 
+                                  (num_vars + 1) * num_dps * sizeof(double), 
+                                  cudaMemcpyHostToDevice));
+            float data_h2d_time = data_h2d_timer.stop();
+            total_h2d_time += data_h2d_time;
+        }
         
         // Launch kernel
         int threads_per_block = 256;
@@ -277,7 +323,8 @@ void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_pred
         
         GPUTimer kernel_timer;
         kernel_timer.start();
-        eval_kernel<<<blocks, threads_per_block>>>(d_tokens, d_values, d_vars_flat, d_pred, num_tokens, num_vars, num_dps);
+        eval_kernel<<<blocks, threads_per_block>>>(d_tokens, d_values, d_vars_flat, d_pred, 
+                                                    num_tokens, num_vars, num_dps);
         float kernel_time = kernel_timer.stop();
         total_kernel_time += kernel_time;
         
@@ -291,13 +338,23 @@ void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_pred
         float d2h_time = d2h_timer.stop();
         total_d2h_time += d2h_time;
         
-        // Free GPU memory
+        // Free GPU memory (tokens, values, pred always; data only if not shared)
         CUDA_CHECK(cudaFree(d_tokens));
         CUDA_CHECK(cudaFree(d_values));
-        CUDA_CHECK(cudaFree(d_vars_flat));
         CUDA_CHECK(cudaFree(d_pred));
         
-        delete[] h_vars_flat;
+        if (!input_info.has_shared_data)
+        {
+            CUDA_CHECK(cudaFree(d_vars_flat));
+            delete[] h_vars_flat;
+        }
+    }
+    
+    // Free shared data if used
+    if (input_info.has_shared_data)
+    {
+        CUDA_CHECK(cudaFree(d_vars_flat_shared));
+        delete[] h_vars_flat_shared;
     }
     
     // Print internal GPU timing breakdown

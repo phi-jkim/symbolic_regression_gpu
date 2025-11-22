@@ -196,6 +196,34 @@ InputInfo parse_input_info(const std::string &input_file)
 
     file.close();
 
+    // Detect if all expressions share the same data file
+    info.has_shared_data = false;
+    if (info.num_exprs > 1)
+    {
+        bool all_same = true;
+        std::string first_file = info.data_filenames[0];
+        int first_num_vars = info.num_vars[0];
+        int first_num_dps = info.num_dps[0];
+        
+        for (int i = 1; i < info.num_exprs; i++)
+        {
+            if (info.data_filenames[i] != first_file ||
+                info.num_vars[i] != first_num_vars ||
+                info.num_dps[i] != first_num_dps)
+            {
+                all_same = false;
+                break;
+            }
+        }
+        
+        info.has_shared_data = all_same;
+        
+        if (info.has_shared_data)
+        {
+            std::cout << "Detected shared data mode: all expressions use " << first_file << std::endl;
+        }
+    }
+
     std::cout << format_formula(info.tokens[0], info.values[0], info.num_tokens[0]) << std::endl;
 
     std::cout << "Loaded digest file: " << input_file << std::endl;
@@ -273,7 +301,28 @@ double **load_data_file(const std::string &filename, int num_vars, int num_dps)
 
 void load_all_data_parallel(InputInfo &input_info, double ***all_vars, int num_threads)
 {
-    // Use atomic counter for work distribution
+    // Optimization: If all expressions share the same data file, load once
+    if (input_info.has_shared_data)
+    {
+        std::cout << "Loading shared data file once..." << std::endl;
+        
+        // Load the shared data file once
+        int num_vars = input_info.num_vars[0];
+        int num_dps = input_info.num_dps[0];
+        std::string data_filename = input_info.data_filenames[0];
+        
+        double **shared_vars = load_data_file(data_filename, num_vars, num_dps);
+        
+        // All expressions point to the same data
+        for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
+        {
+            all_vars[expr_id] = shared_vars;
+        }
+        
+        return;
+    }
+    
+    // Original parallel loading for non-shared data
     std::atomic<int> next_expr(0);
     std::vector<std::thread> threads;
 
@@ -637,11 +686,26 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     save_aggregated_results(digest_file, agg_results);
 
     // Cleanup
+    if (input_info.has_shared_data)
+    {
+        // Shared data: only free once (all pointers are the same)
+        free_data(all_vars[0], input_info.num_vars[0]);
+    }
+    else
+    {
+        // Non-shared data: free each separately
+        for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
+        {
+            free_data(all_vars[expr_id], input_info.num_vars[expr_id]);
+        }
+    }
+    
+    // Free prediction arrays (always separate)
     for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
     {
-        free_data(all_vars[expr_id], input_info.num_vars[expr_id]);
         delete[] all_predictions[expr_id];
     }
+    
     delete[] all_vars;
     delete[] all_predictions;
     free_aggregated_results(agg_results);

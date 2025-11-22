@@ -76,6 +76,10 @@ run_cpu_eval_single: $(CPU_EVAL_BIN)
 run_cpu_eval_multi: $(CPU_EVAL_BIN)
 	$(CPU_EVAL_BIN) data/ai_feyn/multi/input_100_100k.txt
 
+# Test with mutation file (100 mutations, shared data)
+run_cpu_eval_mutations: $(CPU_EVAL_BIN)
+	$(CPU_EVAL_BIN) data/ai_feyn/mutations/input_base056_100mut_100k.txt
+
 # Test with sample input (2 expressions, 1000 data points each)
 run_cpu_eval_sample: $(CPU_EVAL_BIN)
 	$(CPU_EVAL_BIN) data/examples/sample_input.txt
@@ -264,11 +268,12 @@ compare_all_evals: $(CPU_EVAL_BIN) $(CPU_MULTI_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_J
 PREPROCESS_SCRIPT := src/script/preprocess_ai_feyn.py
 MULTI_DIR := data/ai_feyn/multi
 SINGLES_DIR := data/ai_feyn/singles
+MUTATIONS_DIR := data/ai_feyn/mutations
 
-.PHONY: data_gen data_gen_multi data_gen_singles
+.PHONY: data_gen data_gen_multi data_gen_singles data_gen_mutations
 
 # Generate all data files
-data_gen: data_gen_multi data_gen_singles
+data_gen: data_gen_multi data_gen_singles data_gen_mutations
 	@echo ""
 	@echo "=========================================="
 	@echo "All data generation complete!"
@@ -302,6 +307,17 @@ data_gen_singles:
 	python $(PREPROCESS_SCRIPT) --write --quiet
 	@echo ""
 	@echo "Single-expression files generated in $(SINGLES_DIR)"
+
+# Generate mutation files (100 mutations of equation 56 with 100k datapoints)
+data_gen_mutations:
+	@echo ""
+	@echo "=========================================="
+	@echo "Generating mutation files..."
+	@echo "=========================================="
+	@mkdir -p $(MUTATIONS_DIR)
+	python $(PREPROCESS_SCRIPT) --mutation
+	@echo ""
+	@echo "Mutation files generated in $(MUTATIONS_DIR)"
 
 # ============================================================================
 

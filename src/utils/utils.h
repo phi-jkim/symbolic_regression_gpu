@@ -40,6 +40,9 @@ typedef struct {
     int   **tokens_packed;        // nullable
     float **values_packed_f32;    // nullable
     float **X_packed_f32;         // nullable
+    
+    // Shared data optimization (for mutation benchmarks)
+    bool has_shared_data;  // True if all expressions use the same data file
 } InputInfo;
 
 // Single expression view (for compatibility with save_results)
