@@ -11,7 +11,7 @@ NVCC = nvcc
 # - sm_80: Ampere (RTX 30 series, A100)
 # - sm_86: RTX 3090
 # - sm_89: RTX 4090, L40S
-GPU_ARCH ?= sm_89
+GPU_ARCH ?= sm_75
 
 NVFLAGS ?= -O3 \
   -arch=$(GPU_ARCH) \

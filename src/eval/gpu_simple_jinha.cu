@@ -31,7 +31,7 @@ extern "C" void eval_tree_gpu_batch(
         } \
     } while(0)
 
-void eval_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions)
+void eval_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics)
 {
     double alloc_ms = 0.0;
     double memcpy_h2d_ms_total = 0.0;

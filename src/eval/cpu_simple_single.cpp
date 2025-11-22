@@ -128,7 +128,7 @@ double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int
 
 // Batch evaluation function for CPU
 // Processes all expressions and fills prediction arrays
-void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions)
+void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics)
 {
     // Sum of CPU evaluation time across expressions (ms)
     double total_cpu_ms = 0.0;

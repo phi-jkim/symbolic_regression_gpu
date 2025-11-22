@@ -523,6 +523,18 @@ void save_aggregated_results(const std::string &digest_file, const AggregatedRes
     std::cout << "  Total Time:      " << results.total_time_ms << " ms" << std::endl;
     std::cout << "  Total Init Time: " << results.total_init_ms << " ms" << std::endl;
     std::cout << "  Total Eval Time: " << results.total_eval_ms << " ms" << std::endl;
+    
+    // Print eval metrics if available
+    if (results.eval_metrics != nullptr) {
+        std::cout << std::string(60, '-') << std::endl;
+        std::cout << "Eval Function Metrics:" << std::endl;
+        std::cout << "  H→D Transfer:    " << results.eval_metrics->h2d_transfer_ms << " ms" << std::endl;
+        std::cout << "  Kernel Exec:     " << results.eval_metrics->kernel_exec_ms << " ms" << std::endl;
+        std::cout << "  D→H Transfer:    " << results.eval_metrics->d2h_transfer_ms << " ms" << std::endl;
+        std::cout << "  Total GPU:       " << results.eval_metrics->total_gpu_ms << " ms" << std::endl;
+        std::cout << "  Kernel Launches: " << results.eval_metrics->num_kernel_launches << std::endl;
+    }
+    
     std::cout << std::string(60, '-') << std::endl;
     std::cout << "Accuracy Metrics (Average):" << std::endl;
     std::cout << "  MSE:    " << results.avg_mse << std::endl;
@@ -540,6 +552,10 @@ void free_aggregated_results(AggregatedResults &results)
         delete[] results.mse_values;
         delete[] results.median_values;
         delete[] results.stdev_values;
+        if (results.eval_metrics != nullptr) {
+            delete results.eval_metrics;
+            results.eval_metrics = nullptr;
+        }
         results.num_exprs = 0;
     }
 }
@@ -621,18 +637,33 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     // ============================================
     TimePoint eval_start = measure_clock();
 
-    multi_eval_func(input_info, all_vars, all_predictions);
+    // Allocate metrics struct for eval function to optionally fill
+    EvalMetrics eval_metrics;
+    eval_metrics.h2d_transfer_ms = 0.0;
+    eval_metrics.kernel_exec_ms = 0.0;
+    eval_metrics.d2h_transfer_ms = 0.0;
+    eval_metrics.total_gpu_ms = 0.0;
+    eval_metrics.num_kernel_launches = 0;
+
+    multi_eval_func(input_info, all_vars, all_predictions, &eval_metrics);
 
     double total_eval_time = clock_to_ms(eval_start, measure_clock());
 
     // ============================================
-    // PHASE 4: Calculate statistics per expression (parallel with 8 workers)
+    // PHASE 5: Calculate statistics per expression (parallel with 8 workers)
     // ============================================
     AggregatedResults agg_results;
     agg_results.num_exprs = input_info.num_exprs;
     agg_results.mse_values = new double[agg_results.num_exprs];
     agg_results.median_values = new double[agg_results.num_exprs];
     agg_results.stdev_values = new double[agg_results.num_exprs];
+    
+    // Store eval metrics if provided (check if any non-zero values)
+    if (eval_metrics.total_gpu_ms > 0.0 || eval_metrics.num_kernel_launches > 0) {
+        agg_results.eval_metrics = new EvalMetrics(eval_metrics);
+    } else {
+        agg_results.eval_metrics = nullptr;
+    }
 
     // Parallel stats computation with 8 worker threads
     std::atomic<int> next_expr(0);
@@ -682,7 +713,7 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     }
 
     // ============================================
-    // PHASE 5: Calculate totals and averages
+    // PHASE 6: Calculate totals and averages
     // ============================================
     agg_results.total_time_ms = clock_to_ms(start_time, measure_clock());
     agg_results.total_init_ms = total_init_time;
@@ -715,7 +746,7 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     }
 
     // ============================================
-    // PHASE 6: Save results and cleanup
+    // PHASE 7: Save results and cleanup
     // ============================================
     save_aggregated_results(digest_file, agg_results);
 

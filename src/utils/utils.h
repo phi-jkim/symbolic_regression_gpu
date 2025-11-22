@@ -62,6 +62,15 @@ inline double clock_to_ms(TimePoint start, TimePoint end) {
     return std::chrono::duration<double, std::milli>(end - start).count(); 
 }
 
+// Evaluation metrics from eval function (optional, can be nullptr)
+typedef struct {
+    double h2d_transfer_ms;   // Host to device transfer time
+    double kernel_exec_ms;    // Kernel execution time
+    double d2h_transfer_ms;   // Device to host transfer time
+    double total_gpu_ms;      // Total GPU time
+    int num_kernel_launches;  // Number of kernel launches
+} EvalMetrics;
+
 // Result information structure (per expression)
 typedef struct {
     double *pred;         // Predictions array
@@ -85,6 +94,8 @@ typedef struct {
     double avg_mse;         // Average MSE across all expressions
     double avg_median;      // Average median across all expressions
     double avg_stdev;       // Average stdev across all expressions
+    // Optional eval metrics (nullptr if not provided by eval function)
+    EvalMetrics *eval_metrics;
 } AggregatedResults;
 
 // Parse input digest file (handles 1 or more expressions)
@@ -111,7 +122,8 @@ void save_aggregated_results(const std::string& digest_file, const AggregatedRes
 
 // Multi-expression batch evaluation function type
 // Takes all input data, fills all prediction arrays
-typedef void (*MultiEvalFunc)(InputInfo& input_info, double ***all_vars, double **all_predictions);
+// Optional metrics pointer: if non-null, eval function should fill it with timing info
+typedef void (*MultiEvalFunc)(InputInfo& input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics);
 
 // High-level evaluation function (handles both single and multi expressions)
 void evaluate_and_save_results(const std::string& digest_file, InputInfo& input_info,
