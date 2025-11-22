@@ -96,7 +96,7 @@ inline double stack_pop(double *stk)
 double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int num_vars)
 {
     sp = 0;
-    double tmp, val1, val2;
+    double tmp, val1, val2 = 0.0;
     for (int i = num_tokens - 1; i >= 0; i--)
     {
         int tok = tokens[i];

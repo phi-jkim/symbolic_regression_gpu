@@ -562,7 +562,9 @@ void free_aggregated_results(AggregatedResults &results)
 
 void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_info,
                                MultiEvalFunc multi_eval_func,
-                               TimePoint start_time)
+                               TimePoint start_time,
+                               int num_benchmark_runs,
+                               int warmup_runs)
 {
     // ============================================
     // PHASE 1: Load all data (Total Init Time)
@@ -632,22 +634,116 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     }
 
     // ============================================
-    // PHASE 4: Evaluate (Total Eval Time)
+    // PHASE 4: BENCHMARK LOOP - Evaluate multiple times
     // BLACK BOX: CPU or GPU implementation
     // ============================================
-    TimePoint eval_start = measure_clock();
-
-    // Allocate metrics struct for eval function to optionally fill
-    EvalMetrics eval_metrics;
-    eval_metrics.h2d_transfer_ms = 0.0;
-    eval_metrics.kernel_exec_ms = 0.0;
-    eval_metrics.d2h_transfer_ms = 0.0;
-    eval_metrics.total_gpu_ms = 0.0;
-    eval_metrics.num_kernel_launches = 0;
-
-    multi_eval_func(input_info, all_vars, all_predictions, &eval_metrics);
-
-    double total_eval_time = clock_to_ms(eval_start, measure_clock());
+    std::vector<double> eval_times;
+    std::vector<EvalMetrics> all_metrics;
+    
+    int total_runs = warmup_runs + num_benchmark_runs;
+    
+    if (total_runs > 1) {
+        std::cout << "\n" << std::string(60, '=') << std::endl;
+        std::cout << "Benchmark Mode: " << num_benchmark_runs << " measured runs";
+        if (warmup_runs > 0) {
+            std::cout << " (+ " << warmup_runs << " warmup)";
+        }
+        std::cout << std::endl;
+        std::cout << std::string(60, '=') << std::endl;
+    }
+    
+    for (int run = 0; run < total_runs; run++) {
+        bool is_warmup = (run < warmup_runs);
+        
+        if (total_runs > 1) {
+            if (is_warmup) {
+                std::cout << "\n[Warmup " << (run + 1) << "/" << warmup_runs << "]" << std::endl;
+            } else {
+                std::cout << "\n[Run " << (run - warmup_runs + 1) << "/" << num_benchmark_runs << "]" << std::endl;
+            }
+        }
+        
+        TimePoint eval_start = measure_clock();
+        
+        EvalMetrics eval_metrics;
+        eval_metrics.h2d_transfer_ms = 0.0;
+        eval_metrics.kernel_exec_ms = 0.0;
+        eval_metrics.d2h_transfer_ms = 0.0;
+        eval_metrics.total_gpu_ms = 0.0;
+        eval_metrics.num_kernel_launches = 0;
+        
+        multi_eval_func(input_info, all_vars, all_predictions, &eval_metrics);
+        
+        double eval_time = clock_to_ms(eval_start, measure_clock());
+        
+        // Only store measured runs (skip warmup)
+        if (!is_warmup) {
+            eval_times.push_back(eval_time);
+            if (eval_metrics.total_gpu_ms > 0.0 || eval_metrics.num_kernel_launches > 0) {
+                all_metrics.push_back(eval_metrics);
+            }
+        }
+    }
+    
+    // ============================================
+    // Compute benchmark statistics
+    // ============================================
+    double avg_eval_time = 0.0;
+    double min_eval_time = eval_times[0];
+    double max_eval_time = eval_times[0];
+    
+    for (double t : eval_times) {
+        avg_eval_time += t;
+        if (t < min_eval_time) min_eval_time = t;
+        if (t > max_eval_time) max_eval_time = t;
+    }
+    avg_eval_time /= eval_times.size();
+    
+    // Compute stddev
+    double variance = 0.0;
+    for (double t : eval_times) {
+        double diff = t - avg_eval_time;
+        variance += diff * diff;
+    }
+    double std_eval_time = std::sqrt(variance / eval_times.size());
+    
+    // Average eval metrics if available
+    EvalMetrics avg_metrics;
+    avg_metrics.h2d_transfer_ms = 0.0;
+    avg_metrics.kernel_exec_ms = 0.0;
+    avg_metrics.d2h_transfer_ms = 0.0;
+    avg_metrics.total_gpu_ms = 0.0;
+    avg_metrics.num_kernel_launches = 0;
+    
+    if (!all_metrics.empty()) {
+        for (const auto& m : all_metrics) {
+            avg_metrics.h2d_transfer_ms += m.h2d_transfer_ms;
+            avg_metrics.kernel_exec_ms += m.kernel_exec_ms;
+            avg_metrics.d2h_transfer_ms += m.d2h_transfer_ms;
+            avg_metrics.total_gpu_ms += m.total_gpu_ms;
+            avg_metrics.num_kernel_launches += m.num_kernel_launches;
+        }
+        avg_metrics.h2d_transfer_ms /= all_metrics.size();
+        avg_metrics.kernel_exec_ms /= all_metrics.size();
+        avg_metrics.d2h_transfer_ms /= all_metrics.size();
+        avg_metrics.total_gpu_ms /= all_metrics.size();
+        avg_metrics.num_kernel_launches /= all_metrics.size();
+    }
+    
+    // Print benchmark summary if multiple runs
+    if (num_benchmark_runs > 1) {
+        std::cout << "\n" << std::string(60, '=') << std::endl;
+        std::cout << "Benchmark Summary (" << num_benchmark_runs << " runs)" << std::endl;
+        std::cout << std::string(60, '-') << std::endl;
+        std::cout << "Eval Time Statistics:" << std::endl;
+        std::cout << "  Mean:   " << avg_eval_time << " ms" << std::endl;
+        std::cout << "  StdDev: " << std_eval_time << " ms" << std::endl;
+        std::cout << "  Min:    " << min_eval_time << " ms" << std::endl;
+        std::cout << "  Max:    " << max_eval_time << " ms" << std::endl;
+        std::cout << std::string(60, '=') << std::endl;
+    }
+    
+    double total_eval_time = avg_eval_time;
 
     // ============================================
     // PHASE 5: Calculate statistics per expression (parallel with 8 workers)
@@ -658,9 +754,9 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     agg_results.median_values = new double[agg_results.num_exprs];
     agg_results.stdev_values = new double[agg_results.num_exprs];
     
-    // Store eval metrics if provided (check if any non-zero values)
-    if (eval_metrics.total_gpu_ms > 0.0 || eval_metrics.num_kernel_launches > 0) {
-        agg_results.eval_metrics = new EvalMetrics(eval_metrics);
+    // Store averaged eval metrics if provided (check if any non-zero values)
+    if (!all_metrics.empty()) {
+        agg_results.eval_metrics = new EvalMetrics(avg_metrics);
     } else {
         agg_results.eval_metrics = nullptr;
     }

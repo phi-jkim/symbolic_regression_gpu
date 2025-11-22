@@ -126,9 +126,13 @@ void save_aggregated_results(const std::string& digest_file, const AggregatedRes
 typedef void (*MultiEvalFunc)(InputInfo& input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics);
 
 // High-level evaluation function (handles both single and multi expressions)
+// num_benchmark_runs: number of measured eval runs (default 1 for normal operation)
+// warmup_runs: number of warmup runs before measurement (default 0)
 void evaluate_and_save_results(const std::string& digest_file, InputInfo& input_info,
                                 MultiEvalFunc multi_eval_func,
-                                TimePoint start_time);
+                                TimePoint start_time,
+                                int num_benchmark_runs = 1,
+                                int warmup_runs = 0);
 
 // Free result info
 void free_result_info(ResultInfo& info);
