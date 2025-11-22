@@ -171,6 +171,9 @@ SubtreeDetectionResult detect_common_subtrees(
             if (subtrees_match(ref_tokens, ref_values, cand_tokens, cand_values, cand.size)) {
                 verified.push_back(cand);
             }
+            else {
+                std::cout << "Mismatch at expr " << cand.expr_id << " idx " << cand.start_idx << std::endl;
+            }
         }
         
         // Only keep if we still have enough occurrences
@@ -213,13 +216,11 @@ SubtreeDetectionResult detect_common_subtrees(
                 result.sub_occ_expr[sub_id][occ] = verified[occ].expr_id;
                 result.sub_occ_idx[sub_id][occ] = verified[occ].start_idx;
                 
-                // Mark in expr_sub_hints (1-based subtree ID)
-                int subtree_id_1based = sub_id + 1;
-                result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx] = subtree_id_1based;
+                result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx] = sub_id;
                 
                 // Mark all positions in this subtree to skip deeper subtrees
                 for (int i = 1; i < verified[occ].size; i++) {
-                    result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx + i] = subtree_id_1based;
+                    result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx + i] = sub_id;
                 }
             }
         }
