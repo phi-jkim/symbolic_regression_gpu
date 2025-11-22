@@ -363,6 +363,322 @@ def write_digest_file(
         f.write(f"{reconstructed_formula}\n")
 
 
+def mutate_expression_conservative(expr, var_names: List[str], rng) -> sp.Expr:
+    """
+    Apply conservative mutations: small constant perturbations (±10%)
+    """
+    import copy
+
+    def mutate_node(node):
+        if node.is_Number:
+            # Perturb constant by ±10%
+            val = float(node)
+            if val != 0:
+                perturbation = rng.uniform(-0.1, 0.1)
+                new_val = val * (1 + perturbation)
+                return sp.Float(new_val)
+            return node
+        elif node.is_Function or node.is_Pow or node.is_Add or node.is_Mul:
+            # Recurse on children
+            new_args = [mutate_node(arg) for arg in node.args]
+            return node.func(*new_args, evaluate=False)
+        else:
+            return node
+
+    return mutate_node(expr)
+
+
+def mutate_expression_medium(expr, var_names: List[str], rng) -> sp.Expr:
+    """
+    Apply medium mutations: moderate constant perturbations (±30%) + occasional operator flip
+    """
+
+    def mutate_node(node):
+        if node.is_Number:
+            # Perturb constant by ±30%
+            val = float(node)
+            if val != 0:
+                perturbation = rng.uniform(-0.3, 0.3)
+                new_val = val * (1 + perturbation)
+                return sp.Float(new_val)
+            return node
+        elif node.is_Add and rng.random() < 0.15:
+            # 15% chance: flip Add to Mul
+            new_args = [mutate_node(arg) for arg in node.args]
+            return sp.Mul(*new_args, evaluate=False)
+        elif node.is_Mul and rng.random() < 0.15:
+            # 15% chance: flip Mul to Add
+            new_args = [mutate_node(arg) for arg in node.args]
+            return sp.Add(*new_args, evaluate=False)
+        elif node.is_Function:
+            func_name = type(node).__name__.lower()
+            # 15% chance: flip trig functions
+            if func_name == "sin" and rng.random() < 0.15:
+                new_arg = mutate_node(node.args[0])
+                return sp.cos(new_arg, evaluate=False)
+            elif func_name == "cos" and rng.random() < 0.15:
+                new_arg = mutate_node(node.args[0])
+                return sp.sin(new_arg, evaluate=False)
+            else:
+                new_args = [mutate_node(arg) for arg in node.args]
+                return node.func(*new_args, evaluate=False)
+        elif node.is_Pow or node.is_Add or node.is_Mul:
+            new_args = [mutate_node(arg) for arg in node.args]
+            return node.func(*new_args, evaluate=False)
+        else:
+            return node
+
+    return mutate_node(expr)
+
+
+def mutate_expression_aggressive(expr, var_names: List[str], rng) -> sp.Expr:
+    """
+    Apply aggressive mutations: large constant changes (±50%), frequent operator flips, add small terms
+    """
+
+    def mutate_node(node):
+        if node.is_Number:
+            # Perturb constant by ±50%
+            val = float(node)
+            if val != 0:
+                perturbation = rng.uniform(-0.5, 0.5)
+                new_val = val * (1 + perturbation)
+                return sp.Float(new_val)
+            else:
+                # Replace zero with small random constant
+                if rng.random() < 0.2:
+                    return sp.Float(rng.uniform(-0.5, 0.5))
+            return node
+        elif node.is_Add and rng.random() < 0.3:
+            # 30% chance: flip Add to Mul
+            new_args = [mutate_node(arg) for arg in node.args]
+            return sp.Mul(*new_args, evaluate=False)
+        elif node.is_Mul and rng.random() < 0.3:
+            # 30% chance: flip Mul to Add
+            new_args = [mutate_node(arg) for arg in node.args]
+            return sp.Add(*new_args, evaluate=False)
+        elif node.is_Pow and rng.random() < 0.2:
+            # 20% chance: change power operation
+            base = mutate_node(node.args[0])
+            exp = mutate_node(node.args[1])
+            if rng.random() < 0.5:
+                # Perturb exponent
+                if exp.is_Number:
+                    new_exp = sp.Float(float(exp) * rng.uniform(0.7, 1.3))
+                    return sp.Pow(base, new_exp, evaluate=False)
+            return sp.Pow(base, exp, evaluate=False)
+        elif node.is_Function:
+            func_name = type(node).__name__.lower()
+            # 30% chance: flip trig/exp functions
+            if func_name == "sin" and rng.random() < 0.3:
+                new_arg = mutate_node(node.args[0])
+                return sp.cos(new_arg, evaluate=False)
+            elif func_name == "cos" and rng.random() < 0.3:
+                new_arg = mutate_node(node.args[0])
+                return sp.sin(new_arg, evaluate=False)
+            elif func_name == "exp" and rng.random() < 0.3:
+                new_arg = mutate_node(node.args[0])
+                return sp.log(new_arg, evaluate=False)
+            elif func_name == "log" and rng.random() < 0.3:
+                new_arg = mutate_node(node.args[0])
+                return sp.exp(new_arg, evaluate=False)
+            else:
+                new_args = [mutate_node(arg) for arg in node.args]
+                return node.func(*new_args, evaluate=False)
+        elif node.is_Add or node.is_Mul:
+            new_args = [mutate_node(arg) for arg in node.args]
+            return node.func(*new_args, evaluate=False)
+        else:
+            return node
+
+    mutated = mutate_node(expr)
+
+    # 20% chance: add a small random term
+    if rng.random() < 0.2:
+        small_term = sp.Float(rng.uniform(-0.5, 0.5))
+        mutated = sp.Add(mutated, small_term, evaluate=False)
+
+    return mutated
+
+
+def create_mutation_file(
+    digest_csv_filename: str,
+    output_path: str,
+    base_expr_idx: int = 56,  # II.6.15a (hardcoded for now)
+    num_dps: int = 100000,
+    reorder: bool = False,
+) -> None:
+    """
+    Create a multi-expression file with mutations of a single base expression.
+    Generates 19 conservative, 30 medium, and 50 aggressive mutations (99 total + 1 base = 100).
+
+    Args:
+        digest_csv_filename: Path to the CSV file with formulas
+        output_path: Path to write the mutation file
+        base_expr_idx: Index of the base expression in CSV (0-indexed, default: 56 for II.6.15a)
+        num_dps: Number of data points per expression (default: 100000)
+        reorder: Reorder expression tokens to reduce stack size to 4 (default: False)
+    """
+    import random
+
+    # Read CSV file
+    df = pd.read_csv(digest_csv_filename)
+    df = df[df["Filename"].notna()]
+
+    if base_expr_idx >= len(df):
+        raise ValueError(
+            f"Base expression index {base_expr_idx} out of range (max: {len(df)-1})"
+        )
+
+    # Get base expression
+    row = df.iloc[base_expr_idx]
+    formula_str = row["Formula"]
+    data_filename = row["Filename"]
+    num_vars_input = int(row["# variables"])
+    num_vars = num_vars_input + 1  # +1 for output variable
+
+    # Construct variable names
+    var_names = [
+        row[f"v{i+1}_name"] for i in range(num_vars - 1) if row[f"v{i+1}_name"]
+    ] + [row["Output"]]
+
+    print(f"Base expression (index {base_expr_idx}): {formula_str}")
+    print(f"Variables: {var_names}")
+    print(f"Data file: {data_filename}")
+
+    # Parse and binarize the base formula
+    base_expr = parse_and_binarize(formula_str, var_names)
+
+    if base_expr is None:
+        raise Exception(f"Failed to parse base formula")
+
+    # Create output directory
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    successful_exprs = []
+
+    # Add base expression first
+    try:
+        tokens, token_values = expr_to_tokens(base_expr, var_names, reorder)
+        reconstructed, _ = tokens_to_string(tokens, token_values, var_names)
+
+        successful_exprs.append(
+            {
+                "num_vars": num_vars_input,
+                "num_dps": num_dps,
+                "tokens": tokens,
+                "values": token_values,
+                "data_filename": data_filename,
+                "mutation_type": "base",
+                "original_formula": formula_str,
+                "reconstructed_formula": reconstructed,
+            }
+        )
+        print(f"✓ Base expression added")
+    except Exception as e:
+        raise Exception(f"Failed to process base expression: {e}")
+
+    # Generate mutations
+    rng = random.Random(42)  # Fixed seed for reproducibility
+
+    mutation_counts = {
+        "conservative": 19,
+        "medium": 30,
+        "aggressive": 50,
+    }
+
+    for mutation_type, count in mutation_counts.items():
+        print(f"\nGenerating {count} {mutation_type} mutations...")
+
+        for i in range(count):
+            try:
+                # Apply mutation based on type
+                if mutation_type == "conservative":
+                    mutated_expr = mutate_expression_conservative(
+                        base_expr, var_names, rng
+                    )
+                elif mutation_type == "medium":
+                    mutated_expr = mutate_expression_medium(base_expr, var_names, rng)
+                else:  # aggressive
+                    mutated_expr = mutate_expression_aggressive(
+                        base_expr, var_names, rng
+                    )
+
+                # Binarize the mutated expression
+                mutated_expr = binarize_tree(mutated_expr)
+
+                # Convert to tokens
+                tokens, token_values = expr_to_tokens(mutated_expr, var_names, reorder)
+
+                # Reconstruct to verify
+                reconstructed, warnings = tokens_to_string(
+                    tokens, token_values, var_names
+                )
+
+                if warnings:
+                    print(f"  Warning in {mutation_type} mutation {i+1}: {warnings}")
+
+                successful_exprs.append(
+                    {
+                        "num_vars": num_vars_input,
+                        "num_dps": num_dps,
+                        "tokens": tokens,
+                        "values": token_values,
+                        "data_filename": data_filename,
+                        "mutation_type": mutation_type,
+                        "original_formula": str(mutated_expr),
+                        "reconstructed_formula": reconstructed,
+                    }
+                )
+
+            except Exception as e:
+                print(f"  Error in {mutation_type} mutation {i+1}: {e}")
+                continue
+
+        print(
+            f"✓ Generated {len([e for e in successful_exprs if e['mutation_type'] == mutation_type])} {mutation_type} mutations"
+        )
+
+    # Write multi-expression file
+    with open(output_path, "w") as f:
+        # Write num_exprs
+        f.write(f"{len(successful_exprs)}\n")
+
+        # Write each expression
+        for expr_data in successful_exprs:
+            f.write(f"{expr_data['num_vars']}\n")
+            f.write(f"{expr_data['num_dps']}\n")
+            f.write(f"{len(expr_data['tokens'])}\n")
+
+            # Write tokens
+            tokens_str = " ".join(str(t) for t in expr_data["tokens"])
+            f.write(f"{tokens_str}\n")
+
+            # Write values
+            values_str = " ".join(f"{v:.15g}" for v in expr_data["values"])
+            f.write(f"{values_str}\n")
+
+            # Write data filename
+            f.write(f"data/ai_feyn/Feynman_with_units/{expr_data['data_filename']}\n")
+
+    print(f"\n{'='*60}")
+    print(f"✓ Created mutation file: {output_path}")
+    print(f"  Total expressions: {len(successful_exprs)}")
+    print(f"  - Base: 1")
+    print(
+        f"  - Conservative: {len([e for e in successful_exprs if e['mutation_type'] == 'conservative'])}"
+    )
+    print(
+        f"  - Medium: {len([e for e in successful_exprs if e['mutation_type'] == 'medium'])}"
+    )
+    print(
+        f"  - Aggressive: {len([e for e in successful_exprs if e['mutation_type'] == 'aggressive'])}"
+    )
+    print(f"  Data points per expression: {num_dps}")
+    print(f"  Base expression index: {base_expr_idx}")
+    print(f"{'='*60}")
+
+
 def create_multi_expression_file(
     digest_csv_filename: str,
     output_path: str,
@@ -629,6 +945,12 @@ Examples:
   
   # Multi-expression mode with custom CSV input
   python %(prog)s --multi --input data/custom/equations.csv --dps 50000
+  
+  # Mutation mode (generate 100 mutations of equation 56 with 100k datapoints)
+  python %(prog)s --mutation
+  
+  # Mutation mode with custom output path
+  python %(prog)s --mutation --output data/ai_feyn/mutations/custom.txt
         """,
     )
 
@@ -646,6 +968,12 @@ Examples:
         "--multi",
         action="store_true",
         help="Create multi-expression file instead of processing single equations",
+    )
+
+    parser.add_argument(
+        "--mutation",
+        action="store_true",
+        help="Create mutation file with 100 mutations of equation 56 (II.6.15a)",
     )
 
     # Expression optimization
@@ -670,38 +998,61 @@ Examples:
         help="Write output files (single-expression mode)",
     )
 
-    # Multi-expression mode options
+    # Multi-expression and mutation mode options
     parser.add_argument(
         "--dps",
         type=int,
-        default=10000,
-        help="Number of datapoints per expression (multi-expression mode, default: 10000)",
+        default=None,
+        help="Number of datapoints per expression (default: 10000 for multi, 100000 for mutation)",
     )
     parser.add_argument(
         "--output",
         type=str,
         default=None,
-        help="Output file path (multi-expression mode, default: auto-generated)",
+        help="Output file path (default: auto-generated based on mode)",
     )
 
     args = parser.parse_args()
     # print(args)
 
-    # Multi-expression mode
-    if args.multi:
+    # Mutation mode
+    if args.mutation:
         output_path = args.output
+        num_dps = args.dps if args.dps is not None else 100000
+
+        # Auto-generate output path if not specified
+        if output_path is None:
+            # Format: input_base056_100mut_100k.txt
+            if num_dps >= 1000:
+                dps_str = f"{num_dps // 1000}k"
+            else:
+                dps_str = str(num_dps)
+            output_path = f"data/ai_feyn/mutations/input_base056_100mut_{dps_str}.txt"
+
+        create_mutation_file(
+            args.input,
+            output_path,
+            base_expr_idx=56,  # Hardcoded for II.6.15a
+            num_dps=num_dps,
+            reorder=args.reorder,
+        )
+
+    # Multi-expression mode
+    elif args.multi:
+        output_path = args.output
+        num_dps = args.dps if args.dps is not None else 10000
 
         # Auto-generate output path if not specified
         if output_path is None:
             # Format: input_100_10k.txt or input_100_100k.txt
-            if args.dps >= 1000:
-                dps_str = f"{args.dps // 1000}k"
+            if num_dps >= 1000:
+                dps_str = f"{num_dps // 1000}k"
             else:
-                dps_str = str(args.dps)
+                dps_str = str(num_dps)
             output_path = f"data/ai_feyn/multi/input_100_{dps_str}.txt"
 
         create_multi_expression_file(
-            args.input, output_path, args.dps, reorder=args.reorder
+            args.input, output_path, num_dps, reorder=args.reorder
         )
     else:
         # Original single-expression mode

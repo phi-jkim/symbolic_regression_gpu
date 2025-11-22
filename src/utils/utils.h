@@ -29,6 +29,9 @@ typedef struct {
     int **tokens;          // 2D array [expr_id][token_id]
     double **values;       // 2D array [expr_id][value_id]
     std::string *data_filenames; // Array of size num_exprs
+    
+    // Shared data optimization (for mutation benchmarks)
+    bool has_shared_data;  // True if all expressions use the same data file
 } InputInfo;
 
 // Single expression view (for compatibility with save_results)
