@@ -67,8 +67,8 @@ CXXFLAGS = -std=c++11 -O3 -Wall -pthread
 
 BUILD_DIR = build
 CPU_EVAL_BIN = $(BUILD_DIR)/cpu_eval
-UTILS_SRC = src/utils/utils.cpp
-UTILS_HDR = src/utils/utils.h
+UTILS_SRC = src/utils/utils.cpp src/utils/detect.cpp
+UTILS_HDR = src/utils/utils.h src/utils/detect.h
 MAIN_SRC = src/main.cpp
 CPU_EVAL_SRC = src/eval/cpu_simple_single.cpp
 EVALUATOR_HDR = src/eval/evaluator.h
