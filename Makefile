@@ -442,8 +442,8 @@ data_gen_mutations:
 	@echo "Mutation files generated in $(MUTATIONS_DIR)"
 
 # ============================================================================
-
-# Test target for evolution
+# Evolution Tests
+# ============================================================================
 TEST_EVOLVE_BIN = evolution_tests
 TEST_EVOLVE_SRC = src/test/evolution_tests.cpp
 KERNEL_SRC = src/utils/generate.cu src/utils/mutation.cu src/utils/crossover.cu
@@ -454,8 +454,21 @@ $(TEST_EVOLVE_BIN): $(TEST_EVOLVE_SRC) $(KERNEL_SRC)
 run_test_evolve: $(TEST_EVOLVE_BIN)
 	./$(TEST_EVOLVE_BIN)
 
+# ============================================================================
+# Mutation Detection Tests
+# ============================================================================
+TEST_DETECT_BIN = $(BUILD_DIR)/test_detect_mutations
+TEST_DETECT_SRC = src/test/test_detect_mutations.cpp
+
+$(TEST_DETECT_BIN): $(TEST_DETECT_SRC) $(UTILS_SRC) $(UTILS_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -I./src/utils -o $@ $(TEST_DETECT_SRC) $(UTILS_SRC)
+
+run_test_detect: $(TEST_DETECT_BIN)
+	./$(TEST_DETECT_BIN) data/ai_feyn/mutations/input_base056_100mut_1000k.txt 3 2
+
 clean:
-	rm -f $(TARGET) run_gpu $(TEST_BIN) $(BENCH_BIN) $(TEST_EVOLVE_BIN)
+	rm -f $(TARGET) run_gpu $(TEST_BIN) $(BENCH_BIN) $(TEST_EVOLVE_BIN) $(TEST_DETECT_BIN)
 	rm -rf $(BUILD_DIR)
 
 .PHONY: all test run_bench run_test_evolve
