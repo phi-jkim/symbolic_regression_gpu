@@ -137,7 +137,6 @@ run_cpu_multi_eval: run_cpu_multi_eval_multi
 GPU_EVAL_BIN = $(BUILD_DIR)/gpu_eval
 GPU_EVAL_SRC = src/eval/gpu_simple.cu
 
-<<<<<<< HEAD
 # Adjust -arch based on your GPU:
 # - sm_60: Pascal (GTX 10 series, Tesla P100)
 # - sm_70: Volta (Tesla V100)
@@ -147,8 +146,6 @@ GPU_EVAL_SRC = src/eval/gpu_simple.cu
 # - sm_89: RTX 4090, L40S
 GPU_ARCH ?= sm_89
 # GPU_ARCH ?= sm_90
-=======
->>>>>>> refs/remotes/origin/master
 # Use GCC 12 for NVCC to avoid compatibility issues with GCC 13+
 # Suppress deprecated GPU target warnings
 NVCCFLAGS = -std=c++17 -O3 -arch=$(GPU_ARCH) \
