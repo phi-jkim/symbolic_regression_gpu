@@ -378,12 +378,22 @@ ResultInfo make_result_info(double *pred, double **vars, int num_vars, int num_d
 
     result.mse = sum_squared_error / num_dps;
 
-    // Calculate median
-    std::vector<double> sorted_diffs = diffs;
-    std::sort(sorted_diffs.begin(), sorted_diffs.end());
-    result.median = (num_dps % 2 == 0)
-                        ? (sorted_diffs[num_dps / 2 - 1] + sorted_diffs[num_dps / 2]) / 2.0
-                        : sorted_diffs[num_dps / 2];
+    // Calculate median using nth_element (O(N) instead of O(N log N))
+    if (num_dps % 2 == 0)
+    {
+        // Even: need two middle elements
+        std::nth_element(diffs.begin(), diffs.begin() + num_dps / 2 - 1, diffs.end());
+        double lower = diffs[num_dps / 2 - 1];
+        std::nth_element(diffs.begin(), diffs.begin() + num_dps / 2, diffs.end());
+        double upper = diffs[num_dps / 2];
+        result.median = (lower + upper) / 2.0;
+    }
+    else
+    {
+        // Odd: single middle element
+        std::nth_element(diffs.begin(), diffs.begin() + num_dps / 2, diffs.end());
+        result.median = diffs[num_dps / 2];
+    }
 
     // Calculate standard deviation
     double mean_diff = 0.0;
@@ -513,6 +523,18 @@ void save_aggregated_results(const std::string &digest_file, const AggregatedRes
     std::cout << "  Total Time:      " << results.total_time_ms << " ms" << std::endl;
     std::cout << "  Total Init Time: " << results.total_init_ms << " ms" << std::endl;
     std::cout << "  Total Eval Time: " << results.total_eval_ms << " ms" << std::endl;
+    
+    // Print eval metrics if available
+    if (results.eval_metrics != nullptr) {
+        std::cout << std::string(60, '-') << std::endl;
+        std::cout << "Eval Function Metrics:" << std::endl;
+        std::cout << "  H→D Transfer:    " << results.eval_metrics->h2d_transfer_ms << " ms" << std::endl;
+        std::cout << "  Kernel Exec:     " << results.eval_metrics->kernel_exec_ms << " ms" << std::endl;
+        std::cout << "  D→H Transfer:    " << results.eval_metrics->d2h_transfer_ms << " ms" << std::endl;
+        std::cout << "  Total GPU:       " << results.eval_metrics->total_gpu_ms << " ms" << std::endl;
+        std::cout << "  Kernel Launches: " << results.eval_metrics->num_kernel_launches << std::endl;
+    }
+    
     std::cout << std::string(60, '-') << std::endl;
     std::cout << "Accuracy Metrics (Average):" << std::endl;
     std::cout << "  MSE:    " << results.avg_mse << std::endl;
@@ -530,13 +552,19 @@ void free_aggregated_results(AggregatedResults &results)
         delete[] results.mse_values;
         delete[] results.median_values;
         delete[] results.stdev_values;
+        if (results.eval_metrics != nullptr) {
+            delete results.eval_metrics;
+            results.eval_metrics = nullptr;
+        }
         results.num_exprs = 0;
     }
 }
 
 void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_info,
                                MultiEvalFunc multi_eval_func,
-                               TimePoint start_time)
+                               TimePoint start_time,
+                               int num_benchmark_runs,
+                               int warmup_runs)
 {
     // ============================================
     // PHASE 1: Load all data (Total Init Time)
@@ -606,49 +634,182 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     }
 
     // ============================================
-    // PHASE 4: Evaluate (Total Eval Time)
+    // PHASE 4: BENCHMARK LOOP - Evaluate multiple times
     // BLACK BOX: CPU or GPU implementation
     // ============================================
-    TimePoint eval_start = measure_clock();
-
-    multi_eval_func(input_info, all_vars, all_predictions);
-
-    double total_eval_time = clock_to_ms(eval_start, measure_clock());
+    std::vector<double> eval_times;
+    std::vector<EvalMetrics> all_metrics;
+    
+    int total_runs = warmup_runs + num_benchmark_runs;
+    
+    if (total_runs > 1) {
+        std::cout << "\n" << std::string(60, '=') << std::endl;
+        std::cout << "Benchmark Mode: " << num_benchmark_runs << " measured runs";
+        if (warmup_runs > 0) {
+            std::cout << " (+ " << warmup_runs << " warmup)";
+        }
+        std::cout << std::endl;
+        std::cout << std::string(60, '=') << std::endl;
+    }
+    
+    for (int run = 0; run < total_runs; run++) {
+        bool is_warmup = (run < warmup_runs);
+        
+        if (total_runs > 1) {
+            if (is_warmup) {
+                std::cout << "\n[Warmup " << (run + 1) << "/" << warmup_runs << "]" << std::endl;
+            } else {
+                std::cout << "\n[Run " << (run - warmup_runs + 1) << "/" << num_benchmark_runs << "]" << std::endl;
+            }
+        }
+        
+        TimePoint eval_start = measure_clock();
+        
+        EvalMetrics eval_metrics;
+        eval_metrics.h2d_transfer_ms = 0.0;
+        eval_metrics.kernel_exec_ms = 0.0;
+        eval_metrics.d2h_transfer_ms = 0.0;
+        eval_metrics.total_gpu_ms = 0.0;
+        eval_metrics.num_kernel_launches = 0;
+        
+        multi_eval_func(input_info, all_vars, all_predictions, &eval_metrics);
+        
+        double eval_time = clock_to_ms(eval_start, measure_clock());
+        
+        // Only store measured runs (skip warmup)
+        if (!is_warmup) {
+            eval_times.push_back(eval_time);
+            if (eval_metrics.total_gpu_ms > 0.0 || eval_metrics.num_kernel_launches > 0) {
+                all_metrics.push_back(eval_metrics);
+            }
+        }
+    }
+    
+    // ============================================
+    // Compute benchmark statistics
+    // ============================================
+    double avg_eval_time = 0.0;
+    double min_eval_time = eval_times[0];
+    double max_eval_time = eval_times[0];
+    
+    for (double t : eval_times) {
+        avg_eval_time += t;
+        if (t < min_eval_time) min_eval_time = t;
+        if (t > max_eval_time) max_eval_time = t;
+    }
+    avg_eval_time /= eval_times.size();
+    
+    // Compute stddev
+    double variance = 0.0;
+    for (double t : eval_times) {
+        double diff = t - avg_eval_time;
+        variance += diff * diff;
+    }
+    double std_eval_time = std::sqrt(variance / eval_times.size());
+    
+    // Average eval metrics if available
+    EvalMetrics avg_metrics;
+    avg_metrics.h2d_transfer_ms = 0.0;
+    avg_metrics.kernel_exec_ms = 0.0;
+    avg_metrics.d2h_transfer_ms = 0.0;
+    avg_metrics.total_gpu_ms = 0.0;
+    avg_metrics.num_kernel_launches = 0;
+    
+    if (!all_metrics.empty()) {
+        for (const auto& m : all_metrics) {
+            avg_metrics.h2d_transfer_ms += m.h2d_transfer_ms;
+            avg_metrics.kernel_exec_ms += m.kernel_exec_ms;
+            avg_metrics.d2h_transfer_ms += m.d2h_transfer_ms;
+            avg_metrics.total_gpu_ms += m.total_gpu_ms;
+            avg_metrics.num_kernel_launches += m.num_kernel_launches;
+        }
+        avg_metrics.h2d_transfer_ms /= all_metrics.size();
+        avg_metrics.kernel_exec_ms /= all_metrics.size();
+        avg_metrics.d2h_transfer_ms /= all_metrics.size();
+        avg_metrics.total_gpu_ms /= all_metrics.size();
+        avg_metrics.num_kernel_launches /= all_metrics.size();
+    }
+    
+    // Print benchmark summary if multiple runs
+    if (num_benchmark_runs > 1) {
+        std::cout << "\n" << std::string(60, '=') << std::endl;
+        std::cout << "Benchmark Summary (" << num_benchmark_runs << " runs)" << std::endl;
+        std::cout << std::string(60, '-') << std::endl;
+        std::cout << "Eval Time Statistics:" << std::endl;
+        std::cout << "  Mean:   " << avg_eval_time << " ms" << std::endl;
+        std::cout << "  StdDev: " << std_eval_time << " ms" << std::endl;
+        std::cout << "  Min:    " << min_eval_time << " ms" << std::endl;
+        std::cout << "  Max:    " << max_eval_time << " ms" << std::endl;
+        std::cout << std::string(60, '=') << std::endl;
+    }
+    
+    double total_eval_time = avg_eval_time;
 
     // ============================================
-    // PHASE 4: Calculate statistics per expression
+    // PHASE 5: Calculate statistics per expression (parallel with 8 workers)
     // ============================================
     AggregatedResults agg_results;
     agg_results.num_exprs = input_info.num_exprs;
     agg_results.mse_values = new double[agg_results.num_exprs];
     agg_results.median_values = new double[agg_results.num_exprs];
     agg_results.stdev_values = new double[agg_results.num_exprs];
+    
+    // Store averaged eval metrics if provided (check if any non-zero values)
+    if (!all_metrics.empty()) {
+        agg_results.eval_metrics = new EvalMetrics(avg_metrics);
+    } else {
+        agg_results.eval_metrics = nullptr;
+    }
 
-    for (int expr_id = 0; expr_id < input_info.num_exprs; expr_id++)
+    // Parallel stats computation with 8 worker threads
+    std::atomic<int> next_expr(0);
+    std::vector<std::thread> workers;
+    const int num_workers = 8;
+
+    auto worker = [&]()
     {
-        int num_vars = input_info.num_vars[expr_id];
-        int num_dps = input_info.num_dps[expr_id];
+        while (true)
+        {
+            int expr_id = next_expr.fetch_add(1);
+            if (expr_id >= input_info.num_exprs)
+                break;
 
-        ResultInfo result_info = make_result_info(
-            all_predictions[expr_id],
-            all_vars[expr_id],
-            num_vars,
-            num_dps,
-            0.0, // No per-expr init time
-            0.0, // No per-expr eval time
-            0.0);
+            int num_vars = input_info.num_vars[expr_id];
+            int num_dps = input_info.num_dps[expr_id];
 
-        agg_results.mse_values[expr_id] = result_info.mse;
-        agg_results.median_values[expr_id] = result_info.median;
-        agg_results.stdev_values[expr_id] = result_info.stdev;
+            ResultInfo result_info = make_result_info(
+                all_predictions[expr_id],
+                all_vars[expr_id],
+                num_vars,
+                num_dps,
+                0.0, // No per-expr init time
+                0.0, // No per-expr eval time
+                0.0);
 
-        // Don't free pred pointer - it's owned by all_predictions array
-        result_info.pred = nullptr;
-        free_result_info(result_info);
+            agg_results.mse_values[expr_id] = result_info.mse;
+            agg_results.median_values[expr_id] = result_info.median;
+            agg_results.stdev_values[expr_id] = result_info.stdev;
+
+            // Don't free pred pointer - it's owned by all_predictions array
+            result_info.pred = nullptr;
+            free_result_info(result_info);
+        }
+    };
+
+    // Launch worker threads
+    for (int i = 0; i < num_workers; i++)
+    {
+        workers.emplace_back(worker);
+    }
+
+    // Wait for all workers to complete
+    for (auto &t : workers)
+    {
+        t.join();
     }
 
     // ============================================
-    // PHASE 5: Calculate totals and averages
+    // PHASE 6: Calculate totals and averages
     // ============================================
     agg_results.total_time_ms = clock_to_ms(start_time, measure_clock());
     agg_results.total_init_ms = total_init_time;
@@ -681,7 +842,7 @@ void evaluate_and_save_results(const std::string &digest_file, InputInfo &input_
     }
 
     // ============================================
-    // PHASE 6: Save results and cleanup
+    // PHASE 7: Save results and cleanup
     // ============================================
     save_aggregated_results(digest_file, agg_results);
 

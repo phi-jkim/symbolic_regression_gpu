@@ -23,13 +23,21 @@ int main(int argc, char **argv)
 {
     TimePoint main_start = measure_clock();
 
-    if (argc != 2)
+    if (argc < 2)
     {
-        std::cerr << "Usage: " << argv[0] << " <digest_file>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <digest_file> [num_runs] [warmup_runs]" << std::endl;
+        std::cerr << "  num_runs: number of measured eval runs (default: 5)" << std::endl;
+        std::cerr << "  warmup_runs: number of warmup runs before measurement (default: 2)" << std::endl;
         return 1;
     }
 
     std::string digest_file = argv[1];
+    int num_runs = (argc >= 3) ? atoi(argv[2]) : 5;
+    int warmup_runs = (argc >= 4) ? atoi(argv[3]) : 2;
+    
+    // Validate args
+    if (num_runs < 1) num_runs = 1;
+    if (warmup_runs < 0) warmup_runs = 0;
 
 #ifdef USE_GPU_SIMPLE
     // GPU-specific initialization
@@ -60,7 +68,7 @@ int main(int argc, char **argv)
 
     // Evaluate and save results (batch evaluation)
     // eval_batch is defined in evaluator.h based on compile-time flags
-    evaluate_and_save_results(digest_file, input_info, eval_batch, main_start);
+    evaluate_and_save_results(digest_file, input_info, eval_batch, main_start, num_runs, warmup_runs);
 
     // Clean up
     free_input_info(input_info);

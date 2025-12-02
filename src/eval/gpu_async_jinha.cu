@@ -28,7 +28,7 @@ extern "C" void eval_tree_gpu_async(
 
 static bool g_warned_about_sm = false;
 
-void eval_async_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions)
+void eval_async_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics)
 {
     // Check GPU compute capability and warn if not optimal
     if (!g_warned_about_sm) {
