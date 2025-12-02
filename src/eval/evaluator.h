@@ -14,7 +14,7 @@
 #elif defined(USE_GPU_CUSTOM_PEREXPR_MULTI)
     // GPU custom per-expression evaluation using PTX multi-expression batch path
     // (defined in gpu_custom_kernel_per_expression.cu)
-    void eval_multi_expr_ptx_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);
+    void eval_multi_expr_ptx_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics);
     #define eval_batch eval_multi_expr_ptx_batch
 #elif defined(USE_GPU_EVOLVE_JINHA) || defined(USE_GPU_CUSTOM_PEREXPR_EVOLVE)
     // GPU evolution-based evaluation using evolve() (defined in gpu_simple_jinha_with_evolve.cu

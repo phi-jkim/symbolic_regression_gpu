@@ -1325,7 +1325,8 @@ void eval_evolve_jinha_batch(InputInfo &input_info,
 // multi-expr PTX batch path
 void eval_multi_expr_ptx_batch(InputInfo &input_info,
                                double ***all_vars,
-                               double **all_predictions)
+                               double **all_predictions,
+                               EvalMetrics* metrics)
 {
     double alloc_ms = 0.0;
     double memcpy_h2d_ms_total = 0.0;
@@ -1336,107 +1337,149 @@ void eval_multi_expr_ptx_batch(InputInfo &input_info,
         return;
     }
 
-    // Evaluate each expression independently on its own X dataset
+    // ---------------------------------------------------------------------
+    // Shared-data fast path (mutations benchmark): all expressions use the
+    // same dataset (same num_vars, num_dps, and X). In this case we can
+    // build a single PTX kernel over all expressions and launch once.
+    // ---------------------------------------------------------------------
+    if (!(input_info.has_shared_data && num_exprs > 1)) { 
+      printf("Not multi expression and shared data exiting\n"); 
+      return;
+    } 
+
+    const int num_tokens   = input_info.num_tokens[0];
+    const int num_vars     = input_info.num_vars[0];
+    const int num_dps      = input_info.num_dps[0];
+    const int num_features = num_vars + 1;
+
+    if (num_tokens <= 0 || num_dps <= 0 || num_features <= 0) {
+        return;
+    }
+
+    // We assume all expressions share the same num_vars/num_dps.
+
+    // Tokens/values buffers for each expression
+    std::vector<ExprDesc> exprs;
+    exprs.reserve((size_t)num_exprs);
+
+    std::vector<int>   all_tokens;
+    std::vector<float> all_values;
+    all_tokens.reserve((size_t)input_info.max_tokens * (size_t)num_exprs);
+    all_values.reserve((size_t)input_info.max_tokens * (size_t)num_exprs);
+
     for (int expr_id = 0; expr_id < num_exprs; ++expr_id) {
-        const int num_tokens   = input_info.num_tokens[expr_id];
-        const int num_vars     = input_info.num_vars[expr_id];
-        const int num_dps      = input_info.num_dps[expr_id];
-        const int num_features = num_vars + 1;  // vars + label
+        const int expr_tokens = input_info.num_tokens[expr_id];
+        if (expr_tokens <= 0) continue;
 
-        if (num_tokens <= 0 || num_dps <= 0 || num_features <= 0) {
-            continue;
-        }
-
-        // Tokens buffer (prefer packed)
         const int* tokens_host_ptr = nullptr;
         std::vector<int> tokens_temp;
         if (input_info.tokens_packed && input_info.tokens_packed[expr_id]) {
             tokens_host_ptr = input_info.tokens_packed[expr_id];
         } else {
-            tokens_temp.resize(num_tokens);
-            for (int i = 0; i < num_tokens; ++i) {
+            tokens_temp.resize(expr_tokens);
+            for (int i = 0; i < expr_tokens; ++i) {
                 tokens_temp[i] = input_info.tokens[expr_id][i];
             }
             tokens_host_ptr = tokens_temp.data();
         }
 
-        // Values buffer (prefer packed float)
         const float* values_host_ptr = nullptr;
         std::vector<float> values_temp;
         if (input_info.values_packed_f32 && input_info.values_packed_f32[expr_id]) {
             values_host_ptr = input_info.values_packed_f32[expr_id];
         } else {
-            values_temp.resize(num_tokens);
-            for (int i = 0; i < num_tokens; ++i) {
+            values_temp.resize(expr_tokens);
+            for (int i = 0; i < expr_tokens; ++i) {
                 values_temp[i] = (float)input_info.values[expr_id][i];
             }
             values_host_ptr = values_temp.data();
         }
 
-        // X buffer for this expression (prefer pre-packed)
-        const float* X_src = nullptr;
-        std::vector<float> X_host;
-        if (input_info.X_packed_f32 && input_info.X_packed_f32[expr_id]) {
-            X_src = input_info.X_packed_f32[expr_id];
-        } else {
-            X_host.resize((size_t)num_dps * (size_t)num_features);
-            for (int dp = 0; dp < num_dps; ++dp) {
-                for (int v = 0; v < num_features; ++v) {
-                    X_host[(size_t)dp * (size_t)num_features + v] =
-                        (float)all_vars[expr_id][v][dp];
-                }
-            }
-            X_src = X_host.data();
+        size_t base = all_tokens.size();
+        for (int i = 0; i < expr_tokens; ++i) {
+            all_tokens.push_back(tokens_host_ptr[i]);
+            all_values.push_back(values_host_ptr[i]);
         }
 
-        // Device buffers for this expression
-        float *d_X   = nullptr;
-        float *d_out = nullptr;
-
-        TimePoint t_alloc = measure_clock();
-        CUDA_CHECK(cudaMalloc(&d_X,   (size_t)num_dps * (size_t)num_features * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&d_out, (size_t)num_dps * sizeof(float)));
-        CUDA_CHECK(cudaDeviceSynchronize());
-        alloc_ms += clock_to_ms(t_alloc, measure_clock());
-
-        // Host -> device copy for X
-        TimePoint t_h2d = measure_clock();
-        CUDA_CHECK(cudaMemcpy(d_X,
-                              X_src,
-                              (size_t)num_dps * (size_t)num_features * sizeof(float),
-                              cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaDeviceSynchronize());
-        memcpy_h2d_ms_total += clock_to_ms(t_h2d, measure_clock());
-
-        // Evaluate this expression via single-expression straight-line kernel
-        eval_expr_straightline_gpu(tokens_host_ptr,
-                                   values_host_ptr,
-                                   num_tokens,
-                                   d_X,
-                                   num_features,
-                                   num_dps,
-                                   d_out);
-
-        // Copy predictions back
-        std::vector<float> out_host((size_t)num_dps);
-        TimePoint t_d2h = measure_clock();
-        CUDA_CHECK(cudaMemcpy(out_host.data(),
-                              d_out,
-                              (size_t)num_dps * sizeof(float),
-                              cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaDeviceSynchronize());
-        memcpy_d2h_ms_total += clock_to_ms(t_d2h, measure_clock());
-
-        for (int dp = 0; dp < num_dps; ++dp) {
-            all_predictions[expr_id][dp] = (double)out_host[dp];
-        }
-
-        CUDA_CHECK(cudaFree(d_X));
-        CUDA_CHECK(cudaFree(d_out));
+        ExprDesc ed;
+        ed.tokens = all_tokens.data() + base;
+        ed.values = all_values.data() + base;
+        ed.len    = expr_tokens;
+        exprs.push_back(ed);
     }
+
+    if (exprs.empty()) {
+        return;
+    }
+
+    // Shared X buffer (prefer pre-packed from expression 0)
+    const float* X_src = nullptr;
+    std::vector<float> X_host;
+    if (input_info.X_packed_f32 && input_info.X_packed_f32[0]) {
+        X_src = input_info.X_packed_f32[0];
+    } else {
+        X_host.resize((size_t)num_dps * (size_t)num_features);
+        for (int dp = 0; dp < num_dps; ++dp) {
+            for (int v = 0; v < num_features; ++v) {
+                X_host[(size_t)dp * (size_t)num_features + v] =
+                    (float)all_vars[0][v][dp];
+            }
+        }
+        X_src = X_host.data();
+    }
+
+    float *d_X   = nullptr;
+    float *d_out = nullptr;
+
+    TimePoint t_alloc = measure_clock();
+    CUDA_CHECK(cudaMalloc(&d_X,   (size_t)num_dps * (size_t)num_features * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out, (size_t)num_exprs * (size_t)num_dps * sizeof(float)));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    alloc_ms += clock_to_ms(t_alloc, measure_clock());
+
+    TimePoint t_h2d = measure_clock();
+    CUDA_CHECK(cudaMemcpy(d_X,
+                            X_src,
+                            (size_t)num_dps * (size_t)num_features * sizeof(float),
+                            cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    memcpy_h2d_ms_total += clock_to_ms(t_h2d, measure_clock());
+
+    double compile_ms = 0.0;
+    double jit_ms     = 0.0;
+    double launch_ms  = eval_multi_expr_straightline_gpu(
+        exprs,
+        d_X,
+        num_features,
+        num_dps,
+        d_out,
+        &compile_ms,
+        &jit_ms);
+
+    (void)launch_ms;
+
+    std::vector<float> out_host((size_t)num_exprs * (size_t)num_dps);
+    TimePoint t_d2h = measure_clock();
+    CUDA_CHECK(cudaMemcpy(out_host.data(),
+                            d_out,
+                            (size_t)num_exprs * (size_t)num_dps * sizeof(float),
+                            cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    memcpy_d2h_ms_total += clock_to_ms(t_d2h, measure_clock());
+
+    for (int expr_id = 0; expr_id < num_exprs; ++expr_id) {
+        for (int dp = 0; dp < num_dps; ++dp) {
+            size_t idx = (size_t)expr_id * (size_t)num_dps + (size_t)dp;
+            all_predictions[expr_id][dp] = (double)out_host[idx];
+        }
+    }
+
+    CUDA_CHECK(cudaFree(d_X));
+    CUDA_CHECK(cudaFree(d_out));
 
     std::cout << "Alloc time (host wall): " << alloc_ms << " ms" << std::endl;
     std::cout << "Total H2D memcpy time (host wall): " << memcpy_h2d_ms_total << " ms" << std::endl;
     std::cout << "Total D2H memcpy time (host wall): " << memcpy_d2h_ms_total << " ms" << std::endl;
-    std::cout << "(Per-expression NVRTC/driver PTX build & JIT times are logged by eval_expr_straightline_gpu)" << std::endl;
+    std::cout << "(Multi-expression PTX build & JIT times are logged by eval_multi_expr_straightline_gpu)" << std::endl;
+
 }

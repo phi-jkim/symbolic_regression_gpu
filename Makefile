@@ -221,6 +221,10 @@ run_gpu_jinha_eval_multi: $(GPU_JINHA_BIN)
 run_gpu_jinha_eval_sample: $(GPU_JINHA_BIN)
 	$(GPU_JINHA_BIN) data/examples/sample_input.txt
 
+# Test with mutation file (100 mutations, shared data)
+run_gpu_jinha_eval_mutations: $(GPU_JINHA_BIN)
+	$(GPU_JINHA_BIN) data/ai_feyn/mutations/input_base056_100mut_1000k.txt
+
 # Default GPU Jinha run target
 run_gpu_jinha_eval: run_gpu_jinha_eval_sample
 
@@ -315,6 +319,14 @@ run_gpu_custom_kernel_perexpression_sample: $(GPU_CUSTOM_PEREXPR_MULTI_BIN)
 
 # Default non-evolve custom per-expression run target
 run_gpu_custom_kernel_perexpression: run_gpu_custom_kernel_perexpression_sample
+
+# Test with mutation file (100 mutations, shared data) using PTX multi-expression path
+run_gpu_custom_kernel_perexpression_mutations_ptx: $(GPU_CUSTOM_PEREXPR_MULTI_BIN)
+	$(GPU_CUSTOM_PEREXPR_MULTI_BIN) data/ai_feyn/mutations/input_base056_100mut_1000k.txt
+
+# Convenience build target for PTX multi-expression batch evaluator
+.PHONY: eval_multi_expr_ptx_batch
+eval_multi_expr_ptx_batch: $(GPU_CUSTOM_PEREXPR_MULTI_BIN)
 
 # Compare all three implementations
 compare_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN)

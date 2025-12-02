@@ -54,6 +54,46 @@ void eval_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_pr
     CUDA_CHECK(cudaDeviceSynchronize());
     alloc_ms = clock_to_ms(t_alloc, measure_clock());
 
+    // Optional shared-data optimization for X (features) buffer:
+    // if all expressions share the same dataset, build the host X buffer once
+    // from expression 0 and reuse it for all expressions.
+    const bool use_shared_data = (input_info.has_shared_data && input_info.num_exprs > 1);
+    const float* X_shared_host_ptr = nullptr;
+    std::vector<float> X_shared_temp;
+    if (use_shared_data)
+    {
+        int shared_num_vars = input_info.num_vars[0];
+        int shared_num_dps = input_info.num_dps[0];
+        int shared_num_features = shared_num_vars + 1;
+
+        if (input_info.X_packed_f32 && input_info.X_packed_f32[0])
+        {
+            // Reuse pre-packed shared X buffer from expression 0
+            X_shared_host_ptr = input_info.X_packed_f32[0];
+        }
+        else
+        {
+            // Build a single shared X buffer from all_vars[0]
+            X_shared_temp.resize((size_t)shared_num_dps * (size_t)shared_num_features);
+            for (int dp = 0; dp < shared_num_dps; dp++)
+            {
+                for (int var = 0; var < shared_num_features; var++)
+                {
+                    X_shared_temp[(size_t)dp * (size_t)shared_num_features + var] =
+                        (float)all_vars[0][var][dp];
+                }
+            }
+            X_shared_host_ptr = X_shared_temp.data();
+        }
+        // One-time H2D copy of shared X into d_X
+        TimePoint t_h2d_shared_X = measure_clock();
+        CUDA_CHECK(cudaMemcpy(d_X, X_shared_host_ptr,
+                              (size_t)shared_num_dps * (size_t)shared_num_features * sizeof(float),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaDeviceSynchronize());
+        memcpy_h2d_ms_total += clock_to_ms(t_h2d_shared_X, measure_clock());
+    }
+
     // reusable timing events
     cudaEvent_t ev_start, ev_stop;
     CUDA_CHECK(cudaEventCreate(&ev_start));
@@ -97,16 +137,20 @@ void eval_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_pr
         
         const float* X_host_ptr = nullptr;
         std::vector<float> X_temp;
-        if (input_info.X_packed_f32 && input_info.X_packed_f32[expr_id]) {
-            X_host_ptr = input_info.X_packed_f32[expr_id];
-        } else {
-            X_temp.resize((size_t)num_dps * (size_t)num_features);
-            for (int dp = 0; dp < num_dps; dp++) {
-                for (int var = 0; var < num_features; var++) {
-                    X_temp[(size_t)dp * (size_t)num_features + var] = (float) all_vars[expr_id][var][dp];
+        if (!use_shared_data)
+        {
+            // Non-shared path: build/capture per-expression X and copy each time
+            if (input_info.X_packed_f32 && input_info.X_packed_f32[expr_id]) {
+                X_host_ptr = input_info.X_packed_f32[expr_id];
+            } else {
+                X_temp.resize((size_t)num_dps * (size_t)num_features);
+                for (int dp = 0; dp < num_dps; dp++) {
+                    for (int var = 0; var < num_features; var++) {
+                        X_temp[(size_t)dp * (size_t)num_features + var] = (float) all_vars[expr_id][var][dp];
+                    }
                 }
+                X_host_ptr = X_temp.data();
             }
-            X_host_ptr = X_temp.data();
         }
         
         // ============================================
@@ -123,13 +167,16 @@ void eval_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_pr
                              num_tokens * sizeof(float), cudaMemcpyHostToDevice));
         
         // Host-side early-exit check (no device symbol):
-        const bool host_early = (num_tokens > MAX_EVAL_STACK);
-        fprintf(stderr,
-                "[expr %d] host_early_exit(len>%d): %s (len=%d)\n",
-                expr_id, MAX_EVAL_STACK, host_early ? "YES" : "NO", num_tokens);
+        // const bool host_early = (num_tokens > MAX_EVAL_STACK);
+        // fprintf(stderr,
+        //         "[expr %d] host_early_exit(len>%d): %s (len=%d)\n",
+        //         expr_id, MAX_EVAL_STACK, host_early ? "YES" : "NO", num_tokens);
         
-        CUDA_CHECK(cudaMemcpy(d_X, X_host_ptr,
-                              (size_t)num_dps * (size_t)num_features * sizeof(float), cudaMemcpyHostToDevice));
+        if (!use_shared_data)
+        {
+            CUDA_CHECK(cudaMemcpy(d_X, X_host_ptr,
+                                  (size_t)num_dps * (size_t)num_features * sizeof(float), cudaMemcpyHostToDevice));
+        }
         CUDA_CHECK(cudaDeviceSynchronize());
         memcpy_h2d_ms_total += clock_to_ms(t_h2d, measure_clock());
         
