@@ -9,9 +9,10 @@
 
 // ---- Low-level async copy helpers (Ampere+) ----
 
-#ifndef MAX_EVAL_STACK
-#define MAX_EVAL_STACK 8
-#endif
+// #ifndef MAX_EVAL_STACK
+// #define MAX_EVAL_STACK 60
+// #endif
+constexpr int MAX_EVAL_STACK = 60;
 
 #ifndef MAX_NUM_FEATURES
 #define MAX_NUM_FEATURES 16
@@ -108,64 +109,499 @@ __host__ __device__ inline int op_arity(int op);
 __host__ __device__ inline float apply_op(int op, float a, float b);
 __host__ __device__ inline float safe_div(float a, float b);
 
-// ---- Batched (datapoint-parallel) evaluator ----
+__device__ inline void static_stack_push(float *stk, float val, int &sp)
+{
+    // stk[sp] = val;
+    // sp++;
+    #pragma unroll
+    for(int i=MAX_EVAL_STACK-2; i>=0; i--)
+        stk[i+1] = stk[i];
+    stk[0] = val;
+}
 
+__device__ inline float static_stack_pop(float *stk, int &sp)
+{
+    // sp--;
+    // return stk[sp];
+    float val = stk[0];
+    #pragma unroll
+    for(int i=0; i<=MAX_EVAL_STACK-2; i++)
+        stk[i] = stk[i+1];
+    return val;
+}
+
+// 32-element register-backed top-of-stack cache.
+// Implemented as a small fixed-size array so the compiler can scalarize to registers.
+// struct TopCache32 {
+//     float data[32];
+//     int   tc;  // how many live in data[0..tc-1]
+
+//     __device__ __forceinline__ void clear() { tc = 0; }
+// };
+
+__device__ __forceinline__
+void push_cached(float v,
+                 float* __restrict__ stack,
+                 int& sp,          // backing-stack pointer
+                 float* __restrict__ cache, // size 32
+                 int* __restrict__ tc_ptr)  // how many live in cache[0..tc-1]
+{
+    int tc = *tc_ptr;
+    if (tc == 32) {
+        // Spill deepest cached element (logical bottom of the cache)
+        stack[sp] = cache[0];
+        ++sp;
+        // Shift cache down: cache[i] = cache[i+1] for i=0..30
+        #pragma unroll 
+        for (int i = 0; i < 31; ++i) {
+            cache[i] = cache[i + 1];
+        }
+        cache[31] = v;
+    } else {
+        // Just grow cache: shift live prefix down one slot
+        #pragma unroll 
+        for (int i = 0; i < 32; ++i) {
+            if (i == tc) { 
+                cache[i] = v;
+                break;
+            }
+        }
+        ++tc;
+        *tc_ptr = tc;
+    }
+}
+
+__device__ __forceinline__
+float pop_cached(float* __restrict__ stack,
+                 int& sp,
+                 float* __restrict__ cache,
+                 int* __restrict__ tc_ptr)
+{
+    int tc = *tc_ptr;
+    // Pop from cache if we have any cached values
+    if (tc > 0) {
+        float v = 0.0; 
+        #pragma unroll 
+        for (int i = 0; i < 32; ++i) {
+            if (i + 1 == tc) {
+                v = cache[i];
+                break; 
+            }
+        }
+        --tc;
+        *tc_ptr = tc;
+        return v;
+    }
+
+    // No cached values, fall back to backing stack
+    float v = 0.0f;
+    if (sp > 0) {
+        --sp;
+        v = stack[sp];
+    }
+    return v;
+}
+
+// struct RegCache12 {
+//     float c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11;
+
+//     // Push with backing stack + spill when full.
+//     __device__ __forceinline__ void push(float v,
+//                                          float* __restrict__ stack,
+//                                          int& sp, 
+//                                          int& tc)
+//     {
+//         if (tc == 12) {
+//             // Spill the *bottom* (logical oldest) value.
+//             stack[sp++] = c0;
+
+//             // Shift the cache down: c0<-c1, ..., c10<-c11, c11<-v
+//             c0  = c1;   c1  = c2;   c2  = c3;   c3  = c4;
+//             c4  = c5;   c5  = c6;   c6  = c7;   c7  = c8;
+//             c8  = c9;   c9  = c10;  c10 = c11;  c11 = v;
+//             // tc stays 12
+//             return;
+//         }
+
+//         // tc < 12: put v at index tc, then increment tc
+//         switch (tc) {
+//             case  0: c0  = v; break; 
+//             case  1: c1  = v; break;
+//             case  2: c2  = v; break; 
+//             case  3: c3  = v; break;
+//             case  4: c4  = v; break; 
+//             case  5: c5  = v; break;
+//             case  6: c6  = v; break; 
+//             case  7: c7  = v; break;
+//             case  8: c8  = v; break; 
+//             case  9: c9  = v; break;
+//             case 10: c10 = v; break;
+//             case 11: c11 = v; break;
+//             default: break; // should not happen
+//         }
+//         ++tc;
+//     }
+
+//     // Pop returns top of cache if available; else read from backing stack.
+//     __device__ __forceinline__ float pop(float* __restrict__ stack,
+//                                          int& sp,
+//                                          int& tc)
+//     {
+//         if (tc > 0) {
+//             --tc;
+//             switch (tc) {
+//                 case  0: return c0;   
+//                 case  1: return c1;
+//                 case  2: return c2;   
+//                 case  3: return c3;
+//                 case  4: return c4;   
+//                 case  5: return c5;
+//                 case  6: return c6;   
+//                 case  7: return c7;
+//                 case  8: return c8;   
+//                 case  9: return c9;
+//                 case 10: return c10;
+//                 case 11: return c11;
+//                 default: return 0.0f; // shouldn't happen
+//             }
+//         }
+
+//         // Fallback: use backing stack if cache is empty.
+//         if (sp > 0) {
+//             --sp;
+//             return stack[sp];
+//         }
+//         return 0.0f;
+//     }
+// };
+
+// struct RegCache6 {
+//     float c0, c1, c2, c3, c4, c5;
+
+//     // Push with backing stack + spill when full.
+//     __device__ __forceinline__ void push(float v,
+//                                          float* __restrict__ stack,
+//                                          int& sp, 
+//                                          int& tc)
+//     {
+//         if (tc == 6) {
+//             // Spill the *bottom* (logical oldest) value.
+//             stack[sp++] = c0;
+
+//             // Shift the cache down: c0<-c1, ..., c4<-c5, c5<-v
+//             c0 = c1;   c1 = c2;   c2 = c3;
+//             c3 = c4;   c4 = c5;   c5 = v;
+//             // tc stays 6
+//             return;
+//         }
+
+//         // tc < 6: put v at index tc, then increment tc
+//         switch (tc) {
+//             case 0: c0 = v; break;
+//             case 1: c1 = v; break;
+//             case 2: c2 = v; break;
+//             case 3: c3 = v; break;
+//             case 4: c4 = v; break;
+//             case 5: c5 = v; break;
+//             default: break; // should not happen
+//         }
+//         ++tc;
+//     }
+
+//     // Pop returns top of cache if available; else read from backing stack.
+//     __device__ __forceinline__ float pop(float* __restrict__ stack,
+//                                          int& sp,
+//                                          int& tc)
+//     {
+//         if (tc > 0) {
+//             --tc;
+//             switch (tc) {
+//                 case 0: return c0;
+//                 case 1: return c1;
+//                 case 2: return c2;
+//                 case 3: return c3;
+//                 case 4: return c4;
+//                 case 5: return c5;
+//                 default: return 0.0f; // shouldn't happen
+//             }
+//         }
+
+//         // Fallback: use backing stack if cache is empty.
+//         if (sp > 0) {
+//             --sp;
+//             return stack[sp];
+//         }
+//         return 0.0f;
+//     }
+// };
+
+struct RegCache3 {
+    float c0, c1, c2;
+
+    // Push with backing stack + spill when full.
+    __device__ __forceinline__ void push(float v,
+                                         float* __restrict__ stack,
+                                         int& sp, 
+                                         int& tc)
+    {
+        if (tc == 3) {
+            // Spill the *bottom* (logical oldest) value.
+            stack[sp++] = c0;
+
+            // Shift the cache down: c0<-c1, c1<-c2, c2<-v
+            c0 = c1;
+            c1 = c2;
+            c2 = v;
+            // tc stays 3
+            return;
+        }
+
+        // tc < 3: put v at index tc, then increment tc
+        switch (tc) {
+            case 0: c0 = v; break;
+            case 1: c1 = v; break;
+            case 2: c2 = v; break;
+            default: break; // should not happen
+        }
+        ++tc;
+    }
+
+    // Pop returns top of cache if available; else read from backing stack.
+    __device__ __forceinline__ float pop(float* __restrict__ stack,
+                                         int& sp,
+                                         int& tc)
+    {
+        if (tc > 0) {
+            --tc;
+            switch (tc) {
+                case 0: return c0;
+                case 1: return c1;
+                case 2: return c2;
+                default: return 0.0f; // shouldn't happen
+            }
+        }
+
+        // Fallback: use backing stack if cache is empty.
+        if (sp > 0) {
+            --sp;
+            return stack[sp];
+        }
+        return 0.0f;
+    }
+};
+
+
+__launch_bounds__(128, 12)
+// 16
 __global__ void eval_prefix_kernel_batch(const int* __restrict__ tokens,
                                          const float* __restrict__ values,
                                          const float* __restrict__ X, // [dataPoints, num_features]
                                          int len,
                                          int num_features,
                                          int dataPoints,
+                                         float* s_val_old,
                                          float* __restrict__ out) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= dataPoints) return;
-    // if (len > MAX_EVAL_STACK) {
-    //     if (idx == 0) out[0] = NAN;
-    //     return;
-    // }
+    
+    float stack[MAX_EVAL_STACK];   // backing stack (likely local memory)
+    int   sp = 0;
+    int   tc = 0;
 
-    float s_val[MAX_EVAL_STACK];
-    int sp = 0;
+    // RegCache6 cache;
+    RegCache3 cache;
 
     const float* x = X + (size_t)idx * (size_t)num_features;
+    float r;
 
+    // for (int i = len - 1; i >= 0; --i) {
+    //     const int t = tokens[i];
+    //     if (t == TOK_CONST) {
+    //         cache.push(values[i], stack, sp, tc);
+    //     } else if (t == TOK_VAR) {
+    //         int fidx = (int)values[i];
+    //         cache.push((fidx >= 0 && fidx < num_features) ? x[fidx] : 0.0f, stack, sp, tc);
+    //     } else {
+    //         const int ar = op_arity(t);
+    //         if (ar == 1) {
+    //             cache.push(apply_op(t, cache.pop(stack, sp, tc), 0.0f), stack, sp, tc);
+    //         } else if (ar == 2) {
+    //             float a_v = cache.pop(stack, sp, tc);
+    //             float b_v = cache.pop(stack, sp, tc);
+    //             if (t == OP_ADD)      r = a_v + b_v;
+    //             else if (t == OP_SUB) r = a_v - b_v;
+    //             else if (t == OP_MUL) r = a_v * b_v;
+    //             else if (t == OP_DIV) r = a_v / b_v;
+    //             else                  r = apply_op(t, a_v, b_v);
+    //             cache.push(r, stack, sp, tc);
+    //         } else { // ternary IF
+    //             float c = cache.pop(stack, sp, tc);
+    //             float b = cache.pop(stack, sp, tc);
+    //             float a = cache.pop(stack, sp, tc);
+    //             r = (a > 0.0f) ? b : c;
+    //             cache.push(r, stack, sp, tc);
+    //         }
+    //     }
+    // }
 
-    // Evaluate one prefix expression for datapoint idx
+    // // If expression evaluates to a single value without extra backing entries:
+    // // float result = 0.0f;
+    // out[idx] = (tc == 1 && sp == 0) ? cache.pop(stack, sp, tc) : 0.0f;
+
     for (int i = len - 1; i >= 0; --i) {
         const int t = tokens[i];
         if (t == TOK_CONST) {
-            s_val[sp] = values[i]; ++sp;
+            stack[sp] = values[i]; ++sp;
         } else if (t == TOK_VAR) {
             int fidx = (int)values[i];
             float v = (fidx >= 0 && fidx < num_features) ? x[fidx] : 0.0f;
-            s_val[sp] = v; ++sp;
+            stack[sp] = v; ++sp;
         } else {
             const int ar = op_arity(t);
             if (ar == 1) {
-                float a = s_val[--sp];
+                float a = stack[--sp];
                 float r = apply_op(t, a, 0.0f);
-                s_val[sp] = r; ++sp;
+                stack[sp] = r; ++sp;
             } else if (ar == 2) {
-                float a_v = s_val[--sp];
-                float b_v = s_val[--sp];
+                float a_v = stack[--sp];
+                float b_v = stack[--sp];
                 float r;
                 if (t == OP_ADD)      r = a_v + b_v;
                 else if (t == OP_SUB) r = a_v - b_v;
                 else if (t == OP_MUL) r = a_v * b_v;
                 else if (t == OP_DIV) r = a_v / b_v;
                 else                  r = apply_op(t, a_v, b_v);
-                s_val[sp] = r; ++sp;
+                stack[sp] = r; ++sp;
             } else { // ternary IF
-                float c = s_val[--sp];
-                float b = s_val[--sp];
-                float a = s_val[--sp];
+                float c = stack[--sp];
+                float b = stack[--sp];
+                float a = stack[--sp];
                 float r = (a > 0.0f) ? b : c;
-                s_val[sp] = r; ++sp;
+                stack[sp] = r; ++sp;
             }
         }
     }
-    out[idx] = (sp > 0) ? s_val[sp - 1] : 0.0f;
+    out[idx] = (sp > 0) ? stack[sp - 1] : 0.0f;
 }
+
+// ---- Batched (datapoint-parallel) evaluator ----
+
+// Register-backed stack with 60 float slots (no dynamic indexing).
+struct RegStack60 {
+  // 60 scalars => eligible for registers
+  float s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,
+        s10,s11,s12,s13,s14,s15,s16,s17,s18,s19,
+        s20,s21,s22,s23,s24,s25,s26,s27,s28,s29,
+        s30,s31,s32,s33,s34,s35,s36,s37,s38,s39,
+        s40,s41,s42,s43,s44,s45,s46,s47,s48,s49,
+        s50,s51,s52,s53,s54,s55,s56,s57,s58,s59;
+  int sp;
+
+  __device__ __forceinline__ void clear() { sp = 0; }
+
+  __device__ __forceinline__ void push(float v) {
+    switch (sp) {
+      case  0: s0=v; break;  case  1: s1=v; break;  case  2: s2=v; break;  case  3: s3=v; break;
+      case  4: s4=v; break;  case  5: s5=v; break;  case  6: s6=v; break;  case  7: s7=v; break;
+      case  8: s8=v; break;  case  9: s9=v; break;  case 10: s10=v; break; case 11: s11=v; break;
+      case 12: s12=v; break; case 13: s13=v; break; case 14: s14=v; break; case 15: s15=v; break;
+      case 16: s16=v; break; case 17: s17=v; break; case 18: s18=v; break; case 19: s19=v; break;
+      case 20: s20=v; break; case 21: s21=v; break; case 22: s22=v; break; case 23: s23=v; break;
+      case 24: s24=v; break; case 25: s25=v; break; case 26: s26=v; break; case 27: s27=v; break;
+      case 28: s28=v; break; case 29: s29=v; break; case 30: s30=v; break; case 31: s31=v; break;
+      case 32: s32=v; break; case 33: s33=v; break; case 34: s34=v; break; case 35: s35=v; break;
+      case 36: s36=v; break; case 37: s37=v; break; case 38: s38=v; break; case 39: s39=v; break;
+      case 40: s40=v; break; case 41: s41=v; break; case 42: s42=v; break; case 43: s43=v; break;
+      case 44: s44=v; break; case 45: s45=v; break; case 46: s46=v; break; case 47: s47=v; break;
+      case 48: s48=v; break; case 49: s49=v; break; case 50: s50=v; break; case 51: s51=v; break;
+      case 52: s52=v; break; case 53: s53=v; break; case 54: s54=v; break; case 55: s55=v; break;
+      case 56: s56=v; break; case 57: s57=v; break; case 58: s58=v; break; case 59: s59=v; break;
+      default: break; // ignore overflow if expression is malformed
+    }
+    ++sp;
+  }
+
+  __device__ __forceinline__ float pop() {
+    --sp;
+    switch (sp) {
+      case  0: return s0;   case  1: return s1;   case  2: return s2;   case  3: return s3;
+      case  4: return s4;   case  5: return s5;   case  6: return s6;   case  7: return s7;
+      case  8: return s8;   case  9: return s9;   case 10: return s10;  case 11: return s11;
+      case 12: return s12;  case 13: return s13;  case 14: return s14;  case 15: return s15;
+      case 16: return s16;  case 17: return s17;  case 18: return s18;  case 19: return s19;
+      case 20: return s20;  case 21: return s21;  case 22: return s22;  case 23: return s23;
+      case 24: return s24;  case 25: return s25;  case 26: return s26;  case 27: return s27;
+      case 28: return s28;  case 29: return s29;  case 30: return s30;  case 31: return s31;
+      case 32: return s32;  case 33: return s33;  case 34: return s34;  case 35: return s35;
+      case 36: return s36;  case 37: return s37;  case 38: return s38;  case 39: return s39;
+      case 40: return s40;  case 41: return s41;  case 42: return s42;  case 43: return s43;
+      case 44: return s44;  case 45: return s45;  case 46: return s46;  case 47: return s47;
+      case 48: return s48;  case 49: return s49;  case 50: return s50;  case 51: return s51;
+      case 52: return s52;  case 53: return s53;  case 54: return s54;  case 55: return s55;
+      case 56: return s56;  case 57: return s57;  case 58: return s58;  case 59: return s59;
+      default: return 0.f;  // underflow guard for malformed expressions
+    }
+  }
+};
+
+// ---- Batched (datapoint-parallel) evaluator ----
+// Keep your existing op_arity(), apply_op(), token enums, etc.
+// __launch_bounds__(128, 3)  
+// __global__ void eval_prefix_kernel_batch(const int* __restrict__ tokens,
+//                                          const float* __restrict__ values,
+//                                          const float* __restrict__ X, // [dataPoints, num_features]
+//                                          int len,
+//                                          int num_features,
+//                                          int dataPoints,
+//                                          float* __restrict__ out)
+// {
+//     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx >= dataPoints) return;
+
+//     const float* x = X + (size_t)idx * (size_t)num_features;
+
+//     RegStack60 st; 
+//     st.clear();
+
+//     // Evaluate one prefix expression for datapoint idx
+//     // (optional) unroll modestly if len has a small fixed upper bound:
+//     for (int i = len - 1; i >= 0; --i) {
+//         const int t = tokens[i];
+//         if (t == TOK_CONST) {
+//             st.push(values[i]);
+//         } else if (t == TOK_VAR) {
+//             int fidx = (int)values[i];
+//             float v = (fidx >= 0 && fidx < num_features) ? x[fidx] : 0.0f;
+//             st.push(v);
+//         } else {
+//             const int ar = op_arity(t);
+//             if (ar == 1) {
+//                 float a = st.pop();
+//                 float r = apply_op(t, a, 0.0f);
+//                 st.push(r);
+//             } else if (ar == 2) {
+//                 float a_v = st.pop();
+//                 float b_v = st.pop();
+//                 float r;
+//                 if (t == OP_ADD)      r = a_v + b_v;
+//                 else if (t == OP_SUB) r = a_v - b_v;
+//                 else if (t == OP_MUL) r = a_v * b_v;
+//                 else if (t == OP_DIV) r = a_v / b_v;
+//                 else                  r = apply_op(t, a_v, b_v);
+//                 st.push(r);
+//             } else { // ternary IF
+//                 float c = st.pop();
+//                 float b = st.pop();
+//                 float a = st.pop();
+//                 float r = (a > 0.0f) ? b : c;
+//                 st.push(r);
+//             }
+//         }
+//     }
+
+//     float r = (st.sp > 0) ? st.pop() : 0.0f;
+//     out[idx] = r;
+// }
 
 extern "C" void eval_tree_gpu_batch(const int* tokens,
                                     const float* values,
@@ -175,15 +611,78 @@ extern "C" void eval_tree_gpu_batch(const int* tokens,
                                     int dataPoints,
                                     float* out_dev,
                                     int blocks,
-                                    int threads) {
-    if (threads <= 0) threads = 256;
-    if (blocks  <= 0) blocks  = (dataPoints + threads - 1) / threads;
+                                    int threads,
+                                    float* s_val) {
+    // if (threads <= 0) threads = 256;
+    // if (blocks  <= 0) blocks  = (dataPoints + threads - 1) / threads;
     // datapoints 
-    eval_prefix_kernel_batch<<<blocks, threads>>>(tokens, values, X, len, num_features, dataPoints, out_dev);
+    // int shmem = 16000; 
+    eval_prefix_kernel_batch<<<blocks, threads>>>(tokens, values, X, len, num_features, dataPoints, s_val, out_dev);
+    // eval_prefix_kernel_batch<<<blocks, threads>>>(tokens, values, X, len, num_features, dataPoints, out_dev);
 }
 
 // staged tokens/values and per-thread stacks.
 // ---- Batched (datapoint-parallel) evaluator with shared tokens/values ----
+
+// __global__ void eval_prefix_kernel_batch_shmem(const int* __restrict__ tokens,
+//                                                const float* __restrict__ values,
+//                                                const float* __restrict__ X, // [dataPoints, num_features]
+//                                                int len,
+//                                                int num_features,
+//                                                int dataPoints,
+//                                                float* __restrict__ out) {
+//     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx >= dataPoints) return;
+
+//     // Dynamic shared memory layout (16B aligned segments):
+//     // [ s_val_sh: blockDim.x * (MAX_EVAL_STACK+1) * float ]
+//     extern __shared__ unsigned char smem[];
+
+//     // Per-thread value stacks in shared memory with padded stride to avoid bank conflicts
+//     const int STACK_STRIDE = MAX_EVAL_STACK + 1;
+//     float* s_val_sh = reinterpret_cast<float*>(smem);
+//     float* s_val    = s_val_sh + (size_t)threadIdx.x * (size_t)STACK_STRIDE;
+
+//     const float* x = X + (size_t)idx * (size_t)num_features;
+
+//     int sp = 0;
+
+//     // Evaluate one prefix expression for datapoint idx
+//     for (int i = len - 1; i >= 0; --i) {
+//         const int t = tokens[i];
+//         if (t == TOK_CONST) {
+//             s_val[sp++] = values[i];
+//         } else if (t == TOK_VAR) {
+//             int fidx = (int)values[i];
+//             float v = (fidx >= 0 && fidx < num_features) ? x[fidx] : 0.0f;
+//             s_val[sp++] = v;
+//         } else {
+//             const int ar = op_arity(t);
+//             if (ar == 1) {
+//                 float a = s_val[--sp];
+//                 s_val[sp++] = apply_op(t, a, 0.0f);
+//             } else if (ar == 2) {
+//                 float a_v = s_val[--sp];
+//                 float b_v = s_val[--sp];
+//                 float r;
+//                 if      (t == OP_ADD) r = a_v + b_v;
+//                 else if (t == OP_SUB) r = a_v - b_v;
+//                 else if (t == OP_MUL) r = a_v * b_v;
+//                 else if (t == OP_DIV) r = a_v / b_v;
+//                 else                  r = apply_op(t, a_v, b_v);
+//                 s_val[sp++] = r;
+//             } else { // ternary IF
+//                 float c = s_val[--sp];
+//                 float b = s_val[--sp];
+//                 float a = s_val[--sp];
+//                 float r = (a > 0.0f) ? b : c;
+//                 s_val[sp++] = r;
+//             }
+//         }
+//     }
+//     out[idx] = (sp > 0) ? s_val[sp - 1] : 0.0f;
+// }
+
 
 __global__ void eval_prefix_kernel_batch_shmem(const int* __restrict__ tokens,
                                                const float* __restrict__ values,
@@ -202,34 +701,15 @@ __global__ void eval_prefix_kernel_batch_shmem(const int* __restrict__ tokens,
     // }
 
     // Dynamic shared memory layout (16B aligned segments):
-    // [ s_tokens: len * int ]
-    // [ s_values: len * float ]
     // [ s_X: rows_this_block * num_features * float ]  (allocated for max threads)
     extern __shared__ unsigned char smem[];
     auto align16 = [](size_t x) { return (x + 15) & ~((size_t)15); };
 
     size_t off = 0;
-    int*   s_tokens = reinterpret_cast<int*>(smem + off);
-    off = align16(off + (size_t)len * sizeof(int));
-    float* s_values = reinterpret_cast<float*>(smem + off);
-    off = align16(off + (size_t)len * sizeof(float));
-    float* s_X = reinterpret_cast<float*>(smem + off);
-    // Advance past X tile (allocated for full blockDim.x rows)
+    // X tile for this block
     const size_t x_tile_elems = (size_t)blockDim.x * (size_t)num_features;
+    float* s_X = reinterpret_cast<float*>(smem + off);
     off = align16(off + x_tile_elems * sizeof(float));
-
-    // Per-thread value stacks in shared memory with padded stride to avoid bank conflicts
-    const int STACK_STRIDE = MAX_EVAL_STACK + 1;
-    float* s_val_sh = reinterpret_cast<float*>(smem + off);
-    float* s_val    = s_val_sh + (size_t)threadIdx.x * (size_t)STACK_STRIDE;
-    
-    // Stage tokens/values cooperatively across the block
-    for (int i = threadIdx.x; i < len; i += blockDim.x) {
-        s_tokens[i] = tokens[i];
-        s_values[i] = values[i];
-    }
-
-    // float* s_X = reinterpret_cast<float*>(smem + off);
 
     // Compute rows covered by this block and tile X into shared for coalesced loads
     const int block_start = blockIdx.x * blockDim.x;
@@ -243,50 +723,51 @@ __global__ void eval_prefix_kernel_batch_shmem(const int* __restrict__ tokens,
     }
     __syncthreads();
 
-    // Cull inactive threads for tail block
+    // Call inactive threads for tail block
     if (threadIdx.x >= rows_this_block) return;
 
     const float* x = s_X + (size_t)threadIdx.x * (size_t)num_features;
 
     int sp = 0;
+    float stack[MAX_EVAL_STACK];
 
-    // // Evaluate one prefix expression for datapoint idx
+    // Evaluate one prefix expression for datapoint idx
     for (int i = len - 1; i >= 0; --i) {
-        const int t = s_tokens[i];
+        const int t = tokens[i];
         if (t == TOK_CONST) {
-            s_val[sp++] = s_values[i];
+            stack[sp++] = values[i];
         } else if (t == TOK_VAR) {
-            int fidx = (int)s_values[i];
+            int fidx = (int)values[i];
             float v = (fidx >= 0 && fidx < num_features) ? x[fidx] : 0.0f;
-            s_val[sp++] = v;
+            stack[sp++] = v;
         } else {
             const int ar = op_arity(t);
             if (ar == 1) {
-                float a = s_val[--sp];
-                s_val[sp++] = apply_op(t, a, 0.0f);
+                float a = stack[--sp];
+                stack[sp++] = apply_op(t, a, 0.0f);
             } else if (ar == 2) {
-                float a_v = s_val[--sp];
-                float b_v = s_val[--sp];
+                float a_v = stack[--sp];
+                float b_v = stack[--sp];
                 float r;
-                if      (t == OP_ADD) r = a_v + b_v;
-                else if (t == OP_SUB) r = a_v - b_v;
-                else if (t == OP_MUL) r = a_v * b_v;
-                else if (t == OP_DIV) r = a_v / b_v;
-                else                  r = apply_op(t, a_v, b_v);
-                s_val[sp++] = r;
+                // if      (t == OP_ADD) r = a_v + b_v;
+                // else if (t == OP_SUB) r = a_v - b_v;
+                // else if (t == OP_MUL) r = a_v * b_v;
+                // else if (t == OP_DIV) r = a_v / b_v;
+                r = apply_op(t, a_v, b_v);
+                stack[sp++] = r;
             } else { // ternary IF
-                float c = s_val[--sp];
-                float b = s_val[--sp];
-                float a = s_val[--sp];
+                float c = stack[--sp];
+                float b = stack[--sp];
+                float a = stack[--sp];
                 float r = (a > 0.0f) ? b : c;
-                s_val[sp++] = r;
+                stack[sp++] = r;
             }
         }
     }
-    out[block_start + threadIdx.x] = (sp > 0) ? s_val[sp - 1] : 0.0f;
+    out[block_start + threadIdx.x] = (sp > 0) ? stack[sp - 1] : 0.0f;
 }
 
-// extern "C" void eval_tree_gpu_batch_shmem(const int* tokens,
+// extern "C" void eval_tree_gpu_batch(const int* tokens,
 //                                     const float* values,
 //                                     const float* X,
 //                                     int len,
@@ -310,12 +791,12 @@ __global__ void eval_prefix_kernel_batch_shmem(const int* __restrict__ tokens,
 //     // [len * int] [len * float] [T * num_features * float] [T * (MAX_EVAL_STACK+1) * float]
 //     auto align16 = [](size_t x) { return (x + 15) & ~((size_t)15); };
 //     size_t shmem_bytes = 0;
-//     shmem_bytes = align16(shmem_bytes + (size_t)len * sizeof(int));
-//     shmem_bytes = align16(shmem_bytes + (size_t)len * sizeof(float));
+//     // shmem_bytes = align16(shmem_bytes + (size_t)len * sizeof(int));
+//     // shmem_bytes = align16(shmem_bytes + (size_t)len * sizeof(float));
 //     shmem_bytes = align16(shmem_bytes + (size_t)T * (size_t)num_features * sizeof(float));
-//     shmem_bytes = align16(shmem_bytes + (size_t)T * (size_t)(MAX_EVAL_STACK + 1) * sizeof(float));
+//     // shmem_bytes = align16(shmem_bytes + (size_t)T * (size_t)(MAX_EVAL_STACK + 1) * sizeof(float));
 
-//     printf("num_features: %d, shmem_bytes: %zu\n", num_features, shmem_bytes);
+//     // printf("num_features: %d, shmem_bytes: %zu\n", num_features, shmem_bytes);
 
 //     // Launch shared-memory kernel with dynamic shared allocation
 //     eval_prefix_kernel_batch_shmem<<<blocks, T, shmem_bytes>>>(
@@ -325,13 +806,13 @@ __global__ void eval_prefix_kernel_batch_shmem(const int* __restrict__ tokens,
 //     //     tokens, values, X, len, num_features, dataPoints, out_dev);
 
 //     // print num features, shmem_bytes
-//     printf("num_features: %d, shmem_bytes: %zu\n", num_features, shmem_bytes);
+//     // printf("num_features: %d, shmem_bytes: %zu\n", num_features, shmem_bytes);
 
-//     cudaError_t err = cudaGetLastError();
-//     if (err != cudaSuccess) {
-//         fprintf(stderr, "eval_tree_gpu_batch launch error: %s\n",
-//                 cudaGetErrorString(err));
-//     }
+//     // cudaError_t err = cudaGetLastError();
+//     // if (err != cudaSuccess) {
+//     //     fprintf(stderr, "eval_tree_gpu_batch launch error: %s\n",
+//     //             cudaGetErrorString(err));
+//     // }
 // }
 
 

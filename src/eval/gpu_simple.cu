@@ -233,11 +233,12 @@ public:
 };
 
 // Batch evaluation function for GPU (matches MultiEvalFunc signature)
-void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions)
+void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics)
 {
     float total_h2d_time = 0.0f;
     float total_kernel_time = 0.0f;
     float total_d2h_time = 0.0f;
+    int num_kernel_launches = 0;
     
     // Optimization: If shared data, transfer once and reuse
     double *d_vars_flat_shared = nullptr;
@@ -327,6 +328,7 @@ void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_pred
                                                     num_tokens, num_vars, num_dps);
         float kernel_time = kernel_timer.stop();
         total_kernel_time += kernel_time;
+        num_kernel_launches++;
         
         // Check for kernel errors
         CUDA_CHECK(cudaGetLastError());
@@ -355,6 +357,15 @@ void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_pred
     {
         CUDA_CHECK(cudaFree(d_vars_flat_shared));
         delete[] h_vars_flat_shared;
+    }
+    
+    // Fill metrics if provided
+    if (metrics != nullptr) {
+        metrics->h2d_transfer_ms = total_h2d_time;
+        metrics->kernel_exec_ms = total_kernel_time;
+        metrics->d2h_transfer_ms = total_d2h_time;
+        metrics->total_gpu_ms = total_h2d_time + total_kernel_time + total_d2h_time;
+        metrics->num_kernel_launches = num_kernel_launches;
     }
     
     // Print internal GPU timing breakdown

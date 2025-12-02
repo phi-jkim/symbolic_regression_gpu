@@ -2,10 +2,12 @@
 #include <curand_kernel.h>
 #include "../utils/defs.h"
 #include "../utils/gpu_kernel.h"
+#include <cstdio>
+#include <stdio.h>
 
 // Define MAX_STACK_SIZE if not already defined
 #ifndef MAX_TREE_NODE_NUM
-#define MAX_TREE_NODE_NUM 128 // number of nodes in tree 
+#define MAX_TREE_NODE_NUM 1024 // 128// number of nodes in tree 
 #endif
 
 // Random engine helper
@@ -272,10 +274,26 @@ inline void generateExecuteKernel(
 )
 {   
     int gridSize = 0, blockSize = 0;
-    cudaOccupancyMaxPotentialBlockSize(&gridSize, &blockSize, treeGPGenerate<MultiOutput>);
-    if (gridSize * blockSize < popSize)
-    {
-        gridSize = (popSize - 1) / blockSize + 1;
+    cudaError_t err = cudaOccupancyMaxPotentialBlockSize(
+        &gridSize,
+        &blockSize,
+        treeGPGenerate<MultiOutput>,
+        0,          // dynamicSmemPerBlock
+        0           // blockSizeLimit
+    );
+
+    if (err != cudaSuccess) {
+        fprintf(stderr,
+                "cudaOccupancyMaxPotentialBlockSize failed: %s\n",
+                cudaGetErrorString(err));
+        // Fallback: choose a sane config manually
+        blockSize = 128;
+        gridSize  = (popSize + blockSize - 1) / blockSize;
+    } else {
+        printf("gridSize: %d, blockSize: %d\n", gridSize, blockSize);
+        if (gridSize * blockSize < popSize) {
+            gridSize = (popSize - 1) / blockSize + 1;
+        }
     }
     treeGPGenerate<MultiOutput><<<gridSize, blockSize>>>(popSize, maxGPLen, varLen, outLen, constSamplesLen, outProb, constProb, value_res, type_res, subtree_size_res, keys, depth2leafProbs, rouletteFuncs, constSamples);
 }

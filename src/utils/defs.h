@@ -11,7 +11,7 @@
 // Global constants (stack sizes, safety numbers)
 // -----------------------------------------------------------------------------
 #ifndef MAX_FULL_DEPTH
-#define MAX_FULL_DEPTH 10
+#define MAX_FULL_DEPTH 100 // 10 
 #endif
 
 #ifndef DELTA
@@ -22,7 +22,7 @@
 #define MAX_VAL 1e9f
 #endif
 
-constexpr int MAX_STACK      = 1024;   // per-thread scratch memory (matches evogp)
+constexpr int MAX_STACK      = 64;   // per-thread scratch memory (matches evogp)
 
 // -----------------------------------------------------------------------------
 // Node type encoding (7 low bits store the arity category, high bit marks OUT)

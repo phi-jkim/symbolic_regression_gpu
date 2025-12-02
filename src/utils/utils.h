@@ -13,7 +13,7 @@
 #define MAX_VAR_NUM 32
 
 // Stack size for expression evaluation (all current expressions use < 16)
-#define MAX_STACK_SIZE 16
+#define MAX_STACK_SIZE 60 // 16
 
 // Maximum number of tokens per expression
 #define MAX_TOKEN_NUM 64

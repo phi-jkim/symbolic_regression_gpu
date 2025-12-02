@@ -11,14 +11,24 @@
     // GPU async double-buffer evaluation (defined in gpu_async_jinha.cu)
     void eval_async_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);
     #define eval_batch eval_async_jinha_batch
-#elif defined(USE_GPU_EVOLVE_JINHA)
-    // GPU evolution-based evaluation using evolve() (defined in gpu_simple_jinha_with_evolve.cu)
+#elif defined(USE_GPU_CUSTOM_PEREXPR_MULTI)
+    // GPU custom per-expression evaluation using PTX multi-expression batch path
+    // (defined in gpu_custom_kernel_per_expression.cu)
+    void eval_multi_expr_ptx_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);
+    #define eval_batch eval_multi_expr_ptx_batch
+#elif defined(USE_GPU_EVOLVE_JINHA) || defined(USE_GPU_CUSTOM_PEREXPR_EVOLVE)
+    // GPU evolution-based evaluation using evolve() (defined in gpu_simple_jinha_with_evolve.cu
+    // or gpu_custom_kernel_per_expression.cu for the custom per-expression kernel path)
     void eval_evolve_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);
     #define eval_batch eval_evolve_jinha_batch
 #elif defined(USE_GPU_JINHA)
     // GPU evaluation using eval_tree.cu library (defined in gpu_simple_jinha.cu)
     void eval_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);
     #define eval_batch eval_jinha_batch
+#elif defined(USE_GPU_EVOLVE_SIMPLE)
+    // GPU evaluation using gpu_simple.cu evolve entry (reuses eval_kernel)
+    void eval_evolve_simple_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);
+    #define eval_batch eval_evolve_simple_batch
 #elif defined(USE_GPU_SIMPLE)
     // GPU evaluation function (defined in gpu_simple.cu)
     void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions);

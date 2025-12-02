@@ -6,7 +6,13 @@ NVCC = nvcc
 NVFLAGS ?= -O3 \
   -gencode arch=compute_89,code=sm_89 \
   -gencode arch=compute_89,code=compute_89 \
-  -Wno-deprecated-gpu-targets
+  -Xptxas -v
+
+# NVIDIA H200 
+# NVFLAGS ?= -O3 \
+#   -gencode arch=compute_90,code=sm_90 \
+#   -gencode arch=compute_90,code=compute_90 \
+#   -Wno-deprecated-gpu-targets
 TARGET := libevaltree.so
 SRC := eval_tree.cu
 
@@ -54,7 +60,7 @@ run_bench: bench
 # CPU Evaluation Targets (for Feynman equation evaluation)
 # ============================================================================
 CXX = g++
-CXXFLAGS = -std=c++11 -O3 -Wall -pthread
+CXXFLAGS = -std=c++17 -O3 -Wall -pthread
 
 BUILD_DIR = build
 CPU_EVAL_BIN = $(BUILD_DIR)/cpu_eval
@@ -129,10 +135,11 @@ GPU_EVAL_SRC = src/eval/gpu_simple.cu
 # - sm_86: RTX 3090
 # - sm_89: RTX 4090, L40S
 GPU_ARCH ?= sm_89
+# GPU_ARCH ?= sm_90
 # Use GCC 12 for NVCC to avoid compatibility issues with GCC 13+
 # Suppress deprecated GPU target warnings
-NVCCFLAGS = -std=c++11 -O3 -arch=$(GPU_ARCH) \
-	-Wno-deprecated-gpu-targets
+NVCCFLAGS = -std=c++17 -O3 -arch=$(GPU_ARCH) \
+	-Wno-deprecated-gpu-targets -Xptxas -v
 
 $(GPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_EVAL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
@@ -152,6 +159,29 @@ run_gpu_eval_sample: $(GPU_EVAL_BIN)
 
 # Default GPU run target (multi expression)
 run_gpu_eval: run_gpu_eval_multi
+
+# ============================================================================
+# GPU Evolve Simple Evaluation (uses gpu_simple.cu eval_kernel)
+# ============================================================================
+GPU_EVOLVE_SIMPLE_BIN = $(BUILD_DIR)/gpu_evolve_simple
+GPU_EVOLVE_SIMPLE_SRC = src/eval/gpu_simple.cu
+
+
+$(GPU_EVOLVE_SIMPLE_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_EVOLVE_SIMPLE_SRC) src/utils/generate.cu $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_EVOLVE_SIMPLE -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_EVOLVE_SIMPLE_SRC) src/utils/generate.cu
+
+run_gpu_evolve_simple_single: $(GPU_EVOLVE_SIMPLE_BIN)
+	$(GPU_EVOLVE_SIMPLE_BIN) data/ai_feyn/singles/input_001.txt
+
+run_gpu_evolve_simple_multi: $(GPU_EVOLVE_SIMPLE_BIN)
+	$(GPU_EVOLVE_SIMPLE_BIN) data/ai_feyn/multi/input_100_100k.txt
+
+run_gpu_evolve_simple_sample: $(GPU_EVOLVE_SIMPLE_BIN)
+	$(GPU_EVOLVE_SIMPLE_BIN) data/examples/sample_input.txt
+
+run_gpu_evolve_simple: run_gpu_evolve_simple_sample
 
 # ============================================================================
 # GPU Jinha Evaluation (using eval_tree.cu library)
@@ -192,6 +222,18 @@ $(GPU_EVOLVE_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $
 	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_EVOLVE_JINHA -o $@ \
 		$(MAIN_SRC) $(UTILS_SRC) $(GPU_EVOLVE_JINHA_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC)
 
+# PTX output for gpu_evolve_jinha_eval (for sanity checking)
+GPU_EVOLVE_JINHA_PTX = $(BUILD_DIR)/gpu_evolve_jinha_eval.ptx
+
+# Generate PTX only for the CUDA utility kernels (eval_prefix_kernel_batch, etc.)
+# nvcc -ptx with -o requires exactly one input source file.
+$(GPU_EVOLVE_JINHA_PTX): $(UTILS_CU_SRC)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_EVOLVE_JINHA -ptx -o $@ $(UTILS_CU_SRC)
+
+.PHONY: ptx_gpu_evolve_jinha
+ptx_gpu_evolve_jinha: $(GPU_EVOLVE_JINHA_PTX)
+
 # Test with single expression
 run_gpu_evolve_jinha_eval_single: $(GPU_EVOLVE_JINHA_BIN)
 	$(GPU_EVOLVE_JINHA_BIN) data/ai_feyn/singles/input_001.txt
@@ -206,6 +248,59 @@ run_gpu_evolve_jinha_eval_sample: $(GPU_EVOLVE_JINHA_BIN)
 
 # Default GPU Evolve Jinha run target
 run_gpu_evolve_jinha_eval: run_gpu_evolve_jinha_eval_sample
+
+# =========================================================================
+# GPU Custom-Kernel-Per-Expression Evolve (uses gpu_custom_kernel_per_expression.cu)
+# =========================================================================
+GPU_CUSTOM_PEREXPR_BIN = $(BUILD_DIR)/gpu_custom_kernel_perexpression_evolve
+GPU_CUSTOM_PEREXPR_SRC = src/eval/gpu_custom_kernel_per_expression.cu
+
+$(GPU_CUSTOM_PEREXPR_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_CUSTOM_PEREXPR_EVOLVE -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC) \
+		-lnvrtc -lcuda
+
+# Test with single expression (evolve)
+run_gpu_custom_kernel_perexpression_evolve_single: $(GPU_CUSTOM_PEREXPR_BIN)
+	$(GPU_CUSTOM_PEREXPR_BIN) data/ai_feyn/singles/input_001.txt
+
+# Test with multiple expressions (evolve)
+run_gpu_custom_kernel_perexpression_evolve_multi: $(GPU_CUSTOM_PEREXPR_BIN)
+	$(GPU_CUSTOM_PEREXPR_BIN) data/ai_feyn/multi/input_100_100k.txt
+
+# Test with sample input (2 expressions, 1000 data points each, evolve)
+run_gpu_custom_kernel_perexpression_evolve_sample: $(GPU_CUSTOM_PEREXPR_BIN)
+	$(GPU_CUSTOM_PEREXPR_BIN) data/examples/sample_input.txt
+
+# Default GPU custom-kernel-per-expression evolve run target
+run_gpu_custom_kernel_perexpression_evolve: run_gpu_custom_kernel_perexpression_evolve_sample
+
+# =========================================================================
+# GPU Custom-Kernel-Per-Expression Non-Evolve Multi (PTX batch path)
+# =========================================================================
+GPU_CUSTOM_PEREXPR_MULTI_BIN = $(BUILD_DIR)/gpu_custom_kernel_perexpression_multi
+
+$(GPU_CUSTOM_PEREXPR_MULTI_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_CUSTOM_PEREXPR_MULTI -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC) \
+		-lnvrtc -lcuda
+
+# Test with single expression (non-evolve custom per-expression)
+run_gpu_custom_kernel_perexpression_single: $(GPU_CUSTOM_PEREXPR_MULTI_BIN)
+	$(GPU_CUSTOM_PEREXPR_MULTI_BIN) data/ai_feyn/singles/input_001.txt
+
+# Test with multiple expressions (non-evolve custom per-expression)
+run_gpu_custom_kernel_perexpression_multi: $(GPU_CUSTOM_PEREXPR_MULTI_BIN)
+	$(GPU_CUSTOM_PEREXPR_MULTI_BIN) data/ai_feyn/multi/input_100_100k.txt
+
+# Test with sample input (non-evolve custom per-expression)
+run_gpu_custom_kernel_perexpression_sample: $(GPU_CUSTOM_PEREXPR_MULTI_BIN)
+	$(GPU_CUSTOM_PEREXPR_MULTI_BIN) data/examples/sample_input.txt
+
+# Default non-evolve custom per-expression run target
+run_gpu_custom_kernel_perexpression: run_gpu_custom_kernel_perexpression_sample
 
 # Compare all three implementations
 compare_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN)

@@ -5,6 +5,7 @@
 #include "../utils/utils.h"
 #include "../utils/gpu_kernel.h"
 
+
 // Import eval_tree_gpu_batch from utils.cu
 extern "C" void eval_tree_gpu_batch(
     const int* tokens,
@@ -15,11 +16,11 @@ extern "C" void eval_tree_gpu_batch(
     int dataPoints,
     float* out_dev,
     int blocks,
-    int threads
-);
+    int threads,
+    float* s_val);
 
 #ifndef MAX_EVAL_STACK
-#define MAX_EVAL_STACK 52
+#define MAX_EVAL_STACK 60
 #endif
 
 #define CUDA_CHECK(call) \
@@ -146,7 +147,7 @@ void eval_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_pr
 
         eval_tree_gpu_batch(d_tokens, d_values, d_X, 
                            num_tokens, num_features, num_dps,
-                           d_out, blocks, threads);
+                           d_out, blocks, threads, nullptr);
 
         CUDA_CHECK(cudaDeviceSynchronize());
         CUDA_CHECK(cudaEventRecord(ev_stop));
@@ -183,19 +184,39 @@ void eval_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_pr
     CUDA_CHECK(cudaFree(d_values));
     CUDA_CHECK(cudaFree(d_X));
     CUDA_CHECK(cudaFree(d_out));
-    float median_gpu_ms = 0.0f;
-    if (counted_exprs > 0) {
-        std::sort(gpu_ms_list.begin(), gpu_ms_list.end());
-        if (counted_exprs % 2 == 1) {
-            median_gpu_ms = gpu_ms_list[counted_exprs / 2];
-        } else {
-            median_gpu_ms = 0.5f * (gpu_ms_list[counted_exprs / 2 - 1] + gpu_ms_list[counted_exprs / 2]);
+
+    // Summarize kernel timings in the same style as gpu_custom_kernel_per_expression
+    if (!gpu_ms_list.empty()) {
+        float total_ms = 0.0f;
+        for (float v : gpu_ms_list) total_ms += v;
+        float first_ms = gpu_ms_list.front();
+
+        std::vector<float> sorted_all = gpu_ms_list;
+        std::sort(sorted_all.begin(), sorted_all.end());
+        float  median_ms = 0.0f;
+        size_t n         = sorted_all.size();
+        if (n % 2 == 1)
+            median_ms = sorted_all[n / 2];
+        else
+            median_ms = 0.5f * (sorted_all[n / 2 - 1] + sorted_all[n / 2]);
+
+        float  mean_excl_first_ms = 0.0f;
+        size_t n_excl             = 0;
+        if (gpu_ms_list.size() > 1) {
+            for (size_t i = 1; i < gpu_ms_list.size(); ++i) {
+                mean_excl_first_ms += gpu_ms_list[i];
+            }
+            n_excl = gpu_ms_list.size() - 1;
+            mean_excl_first_ms /= (float)n_excl;
         }
+
+        fprintf(stderr,
+                "[evolve] kernel time (launch+sync): total=%g ms, first=%g ms, median_all=%g ms, "
+                "mean_excl_first=%g ms over %zu evals (%zu excl first)\n",
+                (double)total_ms, (double)first_ms, (double)median_ms,
+                (double)mean_excl_first_ms, n, n_excl);
     }
-    std::cout << "GPU computation time (kernels only): total_excl_expr0=" << total_gpu_ms
-              << " ms, median_per_expr_excl_expr0=" << median_gpu_ms
-              << " ms over " << counted_exprs << " exprs" << std::endl;
-    std::cout << "Total kernel time (incl expr0): " << total_gpu_ms_incl0 << " ms" << std::endl;
+
     std::cout << "Alloc time (host wall): " << alloc_ms << " ms" << std::endl;
     std::cout << "Total H2D memcpy time (host wall): " << memcpy_h2d_ms_total << " ms" << std::endl;
     std::cout << "Total D2H memcpy time (host wall): " << memcpy_d2h_ms_total << " ms" << std::endl;
@@ -241,7 +262,8 @@ void evolve(InputInfo &input_info,
             const unsigned int* h_keys,
             const float* h_depth2leaf,
             const float* h_roulette,
-            const float* h_consts)
+            const float* h_consts,
+            std::vector<float>* kernel_times_accum /* optional */)
 {
     if (expr_idx < 0 || expr_idx >= input_info.num_exprs) {
         fprintf(stderr, "evolve: invalid expr_idx %d (num_exprs=%d)\n", expr_idx, input_info.num_exprs);
@@ -327,6 +349,9 @@ void evolve(InputInfo &input_info,
     CUDA_CHECK(cudaMalloc(&d_values, maxGPLen * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_out, (size_t)num_dps * sizeof(float)));
 
+    float *s_val = nullptr;
+    CUDA_CHECK(cudaMalloc(&s_val, (size_t)num_dps * (size_t)MAX_EVAL_STACK * sizeof(float)));
+
     std::vector<int> h_tokens(maxGPLen);
     std::vector<float> h_values(maxGPLen);
     // Remove 
@@ -339,6 +364,13 @@ void evolve(InputInfo &input_info,
 
     float best_fitness = std::numeric_limits<float>::infinity();
     int best_idx = -1;
+
+    // Kernel timing (only eval_tree_gpu_batch calls)
+    cudaEvent_t ev_start, ev_stop;
+    CUDA_CHECK(cudaEventCreate(&ev_start));
+    CUDA_CHECK(cudaEventCreate(&ev_stop));
+    std::vector<float> kernel_times_ms;
+    kernel_times_ms.reserve((size_t)pop_size * (size_t)num_generations);
 
     for (int gen = 0; gen < num_generations; ++gen) {
         CUDA_CHECK(cudaMemcpy(h_pop_val.data(), d_val,
@@ -355,6 +387,7 @@ void evolve(InputInfo &input_info,
 
             int len = (int)sub_i[0];
             if (len <= 0 || len > maxGPLen) continue;
+            // printf("gen=%d, indv=%d, len=%d\n", gen, i, len); 
 
             for (int t = 0; t < len; ++t) {
                 int16_t node_type = (int16_t)(type_i[t] & NodeType::TYPE_MASK);
@@ -377,18 +410,26 @@ void evolve(InputInfo &input_info,
             }
 
             // Debug: human-readable symbolic formula (infix) using existing helper
-            std::string formula = format_formula(h_tokens.data(), h_values_d.data(), len);
-            fprintf(stderr, "[evolve] gen=%d ind=%d len=%d formula=%s\n", gen, i, len, formula.c_str());
+            // std::string formula = format_formula(h_tokens.data(), h_values_d.data(), len);
+            // fprintf(stderr, "[evolve] gen=%d ind=%d len=%d formula=%s\n", gen, i, len, formula.c_str());
 
             CUDA_CHECK(cudaMemcpy(d_tokens, h_tokens.data(), len * sizeof(int), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_values, h_values.data(), len * sizeof(float), cudaMemcpyHostToDevice));
 
             int threads = 128;
             int blocks = (num_dps + threads - 1) / threads;
+
+            // Time only the GPU kernel execution for this individual
+            CUDA_CHECK(cudaEventRecord(ev_start));
             eval_tree_gpu_batch(d_tokens, d_values, d_X,
                                len, varLen, num_dps,
-                               d_out, blocks, threads);
-            CUDA_CHECK(cudaDeviceSynchronize());
+                               d_out, blocks, threads, s_val);
+            CUDA_CHECK(cudaEventRecord(ev_stop));
+            CUDA_CHECK(cudaEventSynchronize(ev_stop));
+
+            float ms = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&ms, ev_start, ev_stop));
+            kernel_times_ms.push_back(ms);
 
             CUDA_CHECK(cudaMemcpy(h_out.data(), d_out,
                                  (size_t)num_dps * sizeof(float), cudaMemcpyDeviceToHost));
@@ -406,6 +447,46 @@ void evolve(InputInfo &input_info,
             }
         }
         fprintf(stderr, "[evolve] generation %d best MSE=%g (idx=%d)\n", gen, best_fitness, best_idx);
+    }
+
+    if (!kernel_times_ms.empty()) {
+        // Compute total, first, median, and mean(excluding first) kernel time over all evals
+        float total_ms = 0.0f;
+        for (float v : kernel_times_ms) total_ms += v;
+        float first_ms = kernel_times_ms.front();
+
+        // Median over all evals (including first)
+        std::vector<float> sorted_all = kernel_times_ms;
+        std::sort(sorted_all.begin(), sorted_all.end());
+        float median_ms = 0.0f;
+        size_t n = sorted_all.size();
+        if (n % 2 == 1)
+            median_ms = sorted_all[n / 2];
+        else
+            median_ms = 0.5f * (sorted_all[n / 2 - 1] + sorted_all[n / 2]);
+
+        // Mean excluding the first eval (to avoid cold-start / JIT effects)
+        float mean_excl_first_ms = 0.0f;
+        size_t n_excl = 0;
+        if (kernel_times_ms.size() > 1) {
+            for (size_t i = 1; i < kernel_times_ms.size(); ++i) {
+                mean_excl_first_ms += kernel_times_ms[i];
+            }
+            n_excl = kernel_times_ms.size() - 1;
+            mean_excl_first_ms /= (float)n_excl;
+        }
+
+        fprintf(stderr,
+                "[evolve] kernel time: total=%g ms, first=%g ms, median_all=%g ms, mean_excl_first=%g ms over %zu evals (%zu excl first)\n",
+                (double)total_ms, (double)first_ms, (double)median_ms,
+                (double)mean_excl_first_ms, n, n_excl);
+    }
+
+    // Optionally export per-kernel timings to an external accumulator
+    if (kernel_times_accum && !kernel_times_ms.empty()) {
+        kernel_times_accum->insert(kernel_times_accum->end(),
+                                   kernel_times_ms.begin(),
+                                   kernel_times_ms.end());
     }
 
     if (best_idx >= 0) {
@@ -437,8 +518,7 @@ void evolve(InputInfo &input_info,
             int blocks = (num_dps + threads - 1) / threads;
             eval_tree_gpu_batch(d_tokens, d_values, d_X,
                                len, varLen, num_dps,
-                               d_out, blocks, threads);
-            CUDA_CHECK(cudaDeviceSynchronize());
+                               d_out, blocks, threads, s_val);
 
             CUDA_CHECK(cudaMemcpy(h_out.data(), d_out,
                                  (size_t)num_dps * sizeof(float), cudaMemcpyDeviceToHost));
@@ -449,9 +529,13 @@ void evolve(InputInfo &input_info,
         }
     }
 
+    cudaEventDestroy(ev_start);
+    cudaEventDestroy(ev_stop);
+
     cudaFree(d_tokens);
     cudaFree(d_values);
     cudaFree(d_out);
+    cudaFree(s_val);
     cudaFree(d_X);
     cudaFree(d_y);
     cudaFree(d_val);
@@ -472,15 +556,16 @@ void eval_evolve_jinha_batch(InputInfo &input_info, double ***all_vars, double *
     // Simple, fixed evolution configuration for now. These can be exposed later.
     const int pop_size = 256;
     const int num_generations = 5;
-    const int maxGPLen = 64; // configurable GP maximum length (independent of input_info.max_tokens)
+    // const int maxGPLen = 1024; // configurable GP maximum length (independent of input_info.max_tokens)
+    const int maxGPLen = 60; 
     const unsigned int constSamplesLen = 8;
     const float outProb = 0.0f;
-    const float constProb = 0.4f;
+    const float constProb = 0.01f;
 
     // Host-side tables mirroring evolution_tests.cpp
     unsigned int h_keys[2] = {42u, 1337u};
     float h_depth[MAX_FULL_DEPTH];
-    for (int i = 0; i < MAX_FULL_DEPTH; ++i) h_depth[i] = 0.25f;
+    for (int i = 0; i < MAX_FULL_DEPTH; ++i) h_depth[i] = 0.0001f;
 
     std::vector<float> h_roulette(Function::LOOSE_SQRT + 1);
     h_roulette[0] = 0.0f;
@@ -489,8 +574,11 @@ void eval_evolve_jinha_batch(InputInfo &input_info, double ***all_vars, double *
 
     float h_consts[constSamplesLen] = {-1.f, -0.5f, 0.f, 0.5f, 1.f, 2.f, 3.f, 4.f};
 
-    for (int expr_idx = 0; expr_idx < input_info.num_exprs; ++expr_idx)
-    {
+    // Accumulate kernel timings across all expressions and generations
+    std::vector<float> batch_kernel_times;
+    batch_kernel_times.reserve((size_t)input_info.num_exprs * (size_t)pop_size * (size_t)num_generations);
+
+    for (int expr_idx = 0; expr_idx < input_info.num_exprs; ++expr_idx) {
         evolve(input_info,
                all_vars,
                all_predictions,
@@ -504,6 +592,38 @@ void eval_evolve_jinha_batch(InputInfo &input_info, double ***all_vars, double *
                h_keys,
                h_depth,
                h_roulette.data(),
-               h_consts);
+               h_consts,
+               &batch_kernel_times);
+    }
+
+    if (!batch_kernel_times.empty()) {
+        float total_ms = 0.0f;
+        for (float v : batch_kernel_times) total_ms += v;
+        float first_ms = batch_kernel_times.front();
+
+        std::vector<float> sorted_all = batch_kernel_times;
+        std::sort(sorted_all.begin(), sorted_all.end());
+        float  median_ms = 0.0f;
+        size_t n         = sorted_all.size();
+        if (n % 2 == 1)
+            median_ms = sorted_all[n / 2];
+        else
+            median_ms = 0.5f * (sorted_all[n / 2 - 1] + sorted_all[n / 2]);
+
+        float  mean_excl_first_ms = 0.0f;
+        size_t n_excl             = 0;
+        if (batch_kernel_times.size() > 1) {
+            for (size_t i = 1; i < batch_kernel_times.size(); ++i) {
+                mean_excl_first_ms += batch_kernel_times[i];
+            }
+            n_excl = batch_kernel_times.size() - 1;
+            mean_excl_first_ms /= (float)n_excl;
+        }
+
+        fprintf(stderr,
+                "[evolve_batch] kernel time (launch+sync): total=%g ms, first=%g ms, median_all=%g ms, "
+                "mean_excl_first=%g ms over %zu evals (%zu excl first)\n",
+                (double)total_ms, (double)first_ms, (double)median_ms,
+                (double)mean_excl_first_ms, n, n_excl);
     }
 }
