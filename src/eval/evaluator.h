@@ -27,12 +27,17 @@
     // CPU multi-threaded evaluation function with 8 workers (defined in cpu_simple_multi.cpp)
     void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics);
     #define eval_batch eval_cpu_batch
+#elif defined(USE_CPU_SUBTREE)
+    // CPU evaluation with common subtree reuse (defined in cpu_subtree.cpp)
+    // Supports both single and multi-threaded execution via CPU_EVAL_THREADS env var
+    void eval_cpu_common_subtree_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics);
+    #define eval_batch eval_cpu_common_subtree_batch
 #elif defined(USE_CPU_SIMPLE)
     // CPU single-threaded evaluation function (defined in cpu_simple_single.cpp)
     void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics);
     #define eval_batch eval_cpu_batch
 #else
-    #error "Must define USE_CPU_SIMPLE, USE_CPU_MULTI, USE_GPU_SIMPLE, USE_GPU_JINHA, or USE_GPU_ASYNC_JINHA"
+    #error "Must define USE_CPU_SIMPLE, USE_CPU_MULTI, USE_CPU_SUBTREE, USE_GPU_SIMPLE, USE_GPU_JINHA, or USE_GPU_ASYNC_JINHA"
 #endif
 
 #endif // EVALUATOR_H

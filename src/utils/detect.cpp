@@ -19,8 +19,8 @@ static int compute_subtree_size(const int* tokens, int start_idx, int total_toke
     
     int token = tokens[start_idx];
     
-    // Variable or constant (negative token)
-    if (token < 0) {
+    // Variable or constant (token <= 0)
+    if (token <= 0) {
         return 1;
     }
     
@@ -216,11 +216,13 @@ SubtreeDetectionResult detect_common_subtrees(
                 result.sub_occ_expr[sub_id][occ] = verified[occ].expr_id;
                 result.sub_occ_idx[sub_id][occ] = verified[occ].start_idx;
                 
+                // Mark root of subtree with its ID
                 result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx] = sub_id;
                 
                 // Mark all positions in this subtree to skip deeper subtrees
+                // We use -2 as a special marker for "inside a common subtree" (SKIP)
                 for (int i = 1; i < verified[occ].size; i++) {
-                    result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx + i] = sub_id;
+                    result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx + i] = -2;
                 }
             }
         }

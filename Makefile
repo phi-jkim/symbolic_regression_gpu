@@ -97,6 +97,23 @@ run_cpu_eval_sample: $(CPU_EVAL_BIN)
 run_cpu_eval: run_cpu_eval_single
 
 # ============================================================================
+# CPU Common Subtree Evaluation Targets
+# ============================================================================
+CPU_COMMON_BIN = $(BUILD_DIR)/cpu_common_subtree
+CPU_COMMON_SRC = src/eval/cpu_subtree.cpp
+
+$(CPU_COMMON_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(CPU_COMMON_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -DUSE_CPU_SUBTREE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_COMMON_SRC)
+
+# Test with mutation file (ideal use case)
+run_cpu_common_mutations: $(CPU_COMMON_BIN)
+	$(CPU_COMMON_BIN) data/ai_feyn/mutations/input_base056_100mut_100k.txt
+
+# Convenience target
+cpu_common: $(CPU_COMMON_BIN)
+
+# ============================================================================
 # CPU Multi-threaded Evaluation Targets
 # ============================================================================
 CPU_MULTI_EVAL_BIN = $(BUILD_DIR)/cpu_multi_eval
@@ -120,6 +137,9 @@ run_cpu_multi_eval_multi: $(CPU_MULTI_EVAL_BIN)
 # Test with sample input (2 expressions, 1000 data points each)
 run_cpu_multi_eval_sample: $(CPU_MULTI_EVAL_BIN)
 	$(CPU_MULTI_EVAL_BIN) data/examples/sample_input.txt
+
+run_cpu_multi_eval_mutations: $(CPU_MULTI_EVAL_BIN)
+	$(CPU_MULTI_EVAL_BIN) data/ai_feyn/mutations/input_base056_100mut_100k.txt
 
 # Default run target (multi expression)
 run_cpu_multi_eval: run_cpu_multi_eval_multi
