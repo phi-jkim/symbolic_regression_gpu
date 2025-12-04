@@ -487,6 +487,20 @@ compare_all_evals: $(CPU_EVAL_BIN) $(CPU_MULTI_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_J
 	@time $(GPU_ASYNC_JINHA_BIN) data/examples/sample_input.txt
 
 # ============================================================================
+# GPU Subtree Evaluator (Two-Stage with Persistent Cache)
+# ============================================================================
+GPU_SUBTREE_BIN = $(BUILD_DIR)/gpu_subtree_eval
+GPU_SUBTREE_SRC = src/eval/gpu_subtree.cu
+
+$(GPU_SUBTREE_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_SUBTREE_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_SUBTREE -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_SUBTREE_SRC) src/utils/detect.cpp
+
+# Default GPU Subtree run target
+gpu_subtree_eval: $(GPU_SUBTREE_BIN)
+
+# ============================================================================
 # Data Generation
 # ============================================================================
 
