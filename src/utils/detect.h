@@ -5,6 +5,10 @@
 // Common Subtree Detection
 // ============================================================================
 
+#include <map>
+#include <vector>
+#include <cstdint>
+
 // Result of common subtree detection across multiple expressions
 typedef struct {
     // Number of common subtrees found
@@ -44,14 +48,44 @@ typedef struct {
 //   SubtreeDetectionResult with all allocated memory
 //   Caller is responsible for freeing using free_subtree_detection_result()
 //
+// Standard stateless detection
+// Stateful cache for cross-generation reuse
+struct SubtreeCache {
+    std::map<uint64_t, int> hash_to_id;       // Maps subtree hash to cache ID
+    std::vector<double*> results;             // Cached results (columns)
+    std::vector<int> ref_counts;              // Reference counts (for potential eviction)
+    std::vector<int> sub_sizes;               // Size of each cached subtree
+    std::vector<int*> sub_tokens;             // Tokens for each cached subtree (for debugging/verification)
+    std::vector<double*> sub_values;          // Values for each cached subtree
+    
+    ~SubtreeCache() {
+        for (double* res : results) delete[] res;
+        for (int* toks : sub_tokens) delete[] toks;
+        for (double* vals : sub_values) delete[] vals;
+    }
+};
+
+// Standard stateless detection
 SubtreeDetectionResult detect_common_subtrees(
     int num_exprs,
-    int num_vars,
-    const int* num_tokens,
+    int num_features,
+    int* num_tokens,
     const int** tokens,
     const double** values,
-    int min_subtree_size = 3,
-    int min_frequency = 2
+    int min_size = 3,
+    int min_freq = 2
+);
+
+// Stateful detection using cache
+SubtreeDetectionResult detect_and_update_cache(
+    SubtreeCache& cache,
+    int num_exprs,
+    int num_features,
+    int* num_tokens,
+    const int** tokens,
+    const double** values,
+    int min_size = 3,
+    int min_freq = 2
 );
 
 // Free all memory allocated by detect_common_subtrees

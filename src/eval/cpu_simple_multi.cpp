@@ -4,11 +4,9 @@
 #include <thread>
 #include <vector>
 #include "../utils/utils.h"
+#include "evaluator.h"
 
-// Number of CPU worker threads (set via -DCPU_EVAL_THREADS=N at compile time)
-#ifndef CPU_EVAL_THREADS
-#define CPU_EVAL_THREADS 8
-#endif
+// Number of CPU worker threads (set via -DCPU_EVAL_THREADS=N at compile time, or defaults in evaluator.h)
 
 double eval_op(int op, double val1, double val2)
 {
@@ -121,7 +119,7 @@ double eval_tree_cpu(int *tokens, double *values, double *x, int num_tokens, int
 
 // Batch evaluation function for CPU with configurable worker threads
 // Processes all expressions and fills prediction arrays
-void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics)
+void eval_cpu_multi_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics)
 {
     const int num_workers = CPU_EVAL_THREADS;
     std::vector<std::thread> threads;

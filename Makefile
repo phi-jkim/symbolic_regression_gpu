@@ -67,7 +67,12 @@ run_test: test
 run_bench: bench
 
 # ============================================================================
-# CPU Evaluation Targets (for Feynman equation evaluation)
+# CPU Build All Target
+# ============================================================================
+all_cpu: cpu_eval cpu_multi_eval cpu_common
+
+# ============================================================================
+# CPU Single-threaded Evaluation Targets
 # ============================================================================
 CXX = g++
 CXXFLAGS = -std=c++17 -O3 -Wall -pthread
@@ -77,12 +82,14 @@ CPU_EVAL_BIN = $(BUILD_DIR)/cpu_eval
 UTILS_SRC = src/utils/utils.cpp src/utils/detect.cpp
 UTILS_HDR = src/utils/utils.h src/utils/detect.h
 MAIN_SRC = src/main.cpp
-CPU_EVAL_SRC = src/eval/cpu_simple_single.cpp
+CPU_EVAL_SRC = src/eval/cpu_simple_single.cpp src/eval/common_eval.cpp
 EVALUATOR_HDR = src/eval/evaluator.h
 
 $(CPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(CPU_EVAL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -DUSE_CPU_SIMPLE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_EVAL_SRC)
+
+cpu_eval: $(CPU_EVAL_BIN)
 
 # Test with single expression
 run_cpu_eval_single: $(CPU_EVAL_BIN)
@@ -104,10 +111,27 @@ run_cpu_eval_sample: $(CPU_EVAL_BIN)
 run_cpu_eval: run_cpu_eval_single
 
 # ============================================================================
+# CPU Common Subtree Evaluation Targets
+# ============================================================================
+CPU_COMMON_BIN = $(BUILD_DIR)/cpu_common_subtree
+CPU_COMMON_SRC = src/eval/cpu_subtree.cpp
+
+$(CPU_COMMON_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(CPU_COMMON_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -DUSE_CPU_SUBTREE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_COMMON_SRC)
+
+# Test with mutation file (ideal use case)
+run_cpu_common_mutations: $(CPU_COMMON_BIN)
+	$(CPU_COMMON_BIN) data/ai_feyn/mutations/input_base056_100mut_100k.txt
+
+# Convenience target
+cpu_common: $(CPU_COMMON_BIN)
+
+# ============================================================================
 # CPU Multi-threaded Evaluation Targets
 # ============================================================================
 CPU_MULTI_EVAL_BIN = $(BUILD_DIR)/cpu_multi_eval
-CPU_MULTI_EVAL_SRC = src/eval/cpu_simple_multi.cpp
+CPU_MULTI_EVAL_SRC = src/eval/cpu_simple_multi.cpp src/eval/common_eval.cpp
 
 # Number of CPU worker threads (configurable at compile time)
 CPU_EVAL_THREADS ?= 8
@@ -115,6 +139,8 @@ CPU_EVAL_THREADS ?= 8
 $(CPU_MULTI_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(CPU_MULTI_EVAL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -DUSE_CPU_MULTI -DCPU_EVAL_THREADS=$(CPU_EVAL_THREADS) -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_MULTI_EVAL_SRC)
+
+cpu_multi_eval: $(CPU_MULTI_EVAL_BIN)
 
 # Test with single expression
 run_cpu_multi_eval_single: $(CPU_MULTI_EVAL_BIN)
@@ -127,6 +153,9 @@ run_cpu_multi_eval_multi: $(CPU_MULTI_EVAL_BIN)
 # Test with sample input (2 expressions, 1000 data points each)
 run_cpu_multi_eval_sample: $(CPU_MULTI_EVAL_BIN)
 	$(CPU_MULTI_EVAL_BIN) data/examples/sample_input.txt
+
+run_cpu_multi_eval_mutations: $(CPU_MULTI_EVAL_BIN)
+	$(CPU_MULTI_EVAL_BIN) data/ai_feyn/mutations/input_base056_100mut_100k.txt
 
 # Default run target (multi expression)
 run_cpu_multi_eval: run_cpu_multi_eval_multi
@@ -538,7 +567,33 @@ TEST_DETECT_SRC = src/test/test_detect_mutations.cpp
 $(TEST_DETECT_BIN): $(TEST_DETECT_SRC) $(UTILS_SRC) $(UTILS_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -I./src/utils -o $@ $(TEST_DETECT_SRC) $(UTILS_SRC)
+# ============================================================================
+# Evolution Benchmark Targets
+# ============================================================================
 
+# Data Generation
+gen_data_long:
+	python3 src/script/generate_evolution_data.py --gens 20 --dps 500000 --out data/evolution_long_large
+
+gen_data_short:
+	python3 src/script/generate_evolution_data.py --gens 5 --dps 100000 --out data/evolution_short_small
+
+# Run Benchmarks (Stateful vs Stateless Multi-threaded)
+bench_long: cpu_common cpu_multi_eval
+	@echo "--- Running Long & Large Benchmark (20 gens, 500k dps) ---"
+	@echo ">> Stateful Subtree (1 thread)"
+	./build/cpu_common_subtree -evolution 0 19 data/evolution_long_large
+	@echo ">> CPU Multi (8 threads)"
+	./build/cpu_multi_eval -evolution 0 19 data/evolution_long_large
+
+bench_short: cpu_common cpu_multi_eval
+	@echo "--- Running Short & Small Benchmark (5 gens, 100k dps) ---"
+	@echo ">> Stateful Subtree (1 thread)"
+	./build/cpu_common_subtree -evolution 0 4 data/evolution_short_small
+	@echo ">> CPU Multi (8 threads)"
+	./build/cpu_multi_eval -evolution 0 4 data/evolution_short_small
+
+bench_all_evolution: gen_data_short gen_data_long bench_short bench_long
 run_test_detect: $(TEST_DETECT_BIN)
 	./$(TEST_DETECT_BIN) data/ai_feyn/mutations/input_base056_100mut_1000k.txt 3 2
 
