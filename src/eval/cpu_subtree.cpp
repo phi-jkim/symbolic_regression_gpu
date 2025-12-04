@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include "../utils/utils.h"
 #include "../utils/detect.h"
+#include "evaluator.h"
 
 // ============================================================================
 // Standard CPU Evaluator (Helper for evaluating subtrees)
@@ -476,12 +477,13 @@ void eval_cpu_stateful_batch(
     EvalMetrics* metrics)
 {
     // Determine thread count
-    int num_threads = 1;
+    int num_threads = CPU_EVAL_THREADS;
     const char* env_threads = std::getenv("CPU_EVAL_THREADS");
     if (env_threads) {
-        num_threads = std::atoi(env_threads);
-        if (num_threads < 1) num_threads = 1;
+        num_threads = std::stoi(env_threads);
     }
+    if (num_threads < 1) num_threads = 1;
+    
 
     // Step 1: Detect and update cache (Serial)
     int min_freq = 5; 
@@ -538,7 +540,7 @@ int run_evolution_benchmark(int start_gen, int end_gen, const std::string& data_
         std::string filename = data_dir + "/gen_" + std::to_string(start_gen) + ".txt";
         InputInfo info = parse_input_info(filename);
         if (info.num_exprs > 0 && info.has_shared_data) {
-            std::cout << "Pre-loading shared data from " << info.data_filenames[0] << "..." << std::endl;
+            // std::cout << "Pre-loading shared data from " << info.data_filenames[0] << "..." << std::endl;
             shared_data_ptr = load_data_file(info.data_filenames[0], info.num_vars[0], info.num_dps[0]);
             shared_num_vars = info.num_vars[0];
             shared_num_dps = info.num_dps[0];
@@ -602,11 +604,11 @@ int run_evolution_benchmark(int start_gen, int end_gen, const std::string& data_
     
     // Free shared data at the end
     if (shared_data_ptr != nullptr) {
-        std::cout << "Freeing shared data..." << std::endl;
+        // std::cout << "Freeing shared data..." << std::endl;
         for(int i=0; i<=shared_num_vars; i++) free(shared_data_ptr[i]);
         free(shared_data_ptr);
     }
     
-    std::cout << "Total Evolution Time: " << total_time_ms << " ms" << std::endl;
+    std::cout << "### Total Evolution Time: " << total_time_ms << " ms ###" << std::endl;
     return 0;
 }

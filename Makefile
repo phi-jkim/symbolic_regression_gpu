@@ -376,7 +376,33 @@ TEST_DETECT_SRC = src/test/test_detect_mutations.cpp
 $(TEST_DETECT_BIN): $(TEST_DETECT_SRC) $(UTILS_SRC) $(UTILS_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -I./src/utils -o $@ $(TEST_DETECT_SRC) $(UTILS_SRC)
+# ============================================================================
+# Evolution Benchmark Targets
+# ============================================================================
 
+# Data Generation
+gen_data_long:
+	python3 src/script/generate_evolution_data.py --gens 20 --dps 500000 --out data/evolution_long_large
+
+gen_data_short:
+	python3 src/script/generate_evolution_data.py --gens 5 --dps 100000 --out data/evolution_short_small
+
+# Run Benchmarks (Stateful vs Stateless Multi-threaded)
+bench_long: cpu_common cpu_multi_eval
+	@echo "--- Running Long & Large Benchmark (20 gens, 500k dps) ---"
+	@echo ">> Stateful Subtree (1 thread)"
+	./build/cpu_common_subtree -evolution 0 19 data/evolution_long_large
+	@echo ">> CPU Multi (8 threads)"
+	./build/cpu_multi_eval -evolution 0 19 data/evolution_long_large
+
+bench_short: cpu_common cpu_multi_eval
+	@echo "--- Running Short & Small Benchmark (5 gens, 100k dps) ---"
+	@echo ">> Stateful Subtree (1 thread)"
+	./build/cpu_common_subtree -evolution 0 4 data/evolution_short_small
+	@echo ">> CPU Multi (8 threads)"
+	./build/cpu_multi_eval -evolution 0 4 data/evolution_short_small
+
+bench_all_evolution: gen_data_short gen_data_long bench_short bench_long
 run_test_detect: $(TEST_DETECT_BIN)
 	./$(TEST_DETECT_BIN) data/ai_feyn/mutations/input_base056_100mut_1000k.txt 3 2
 

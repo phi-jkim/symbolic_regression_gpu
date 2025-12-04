@@ -220,14 +220,14 @@ InputInfo parse_input_info(const std::string &input_file)
         
         if (info.has_shared_data)
         {
-            std::cout << "Detected shared data mode: all expressions use " << first_file << std::endl;
+            // std::cout << "Detected shared data mode: all expressions use " << first_file << std::endl;
         }
     }
 
-    std::cout << format_formula(info.tokens[0], info.values[0], info.num_tokens[0]) << std::endl;
+    // std::cout << format_formula(info.tokens[0], info.values[0], info.num_tokens[0]) << std::endl;
 
-    std::cout << "Loaded digest file: " << input_file << std::endl;
-    std::cout << "Number of expressions: " << info.num_exprs << std::endl;
+    // std::cout << "Loaded digest file: " << input_file << std::endl;
+    // std::cout << "Number of expressions: " << info.num_exprs << std::endl;
 
     return info;
 }

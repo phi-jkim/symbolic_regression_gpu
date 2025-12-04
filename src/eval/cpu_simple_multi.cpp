@@ -4,11 +4,9 @@
 #include <thread>
 #include <vector>
 #include "../utils/utils.h"
+#include "evaluator.h"
 
-// Number of CPU worker threads (set via -DCPU_EVAL_THREADS=N at compile time)
-#ifndef CPU_EVAL_THREADS
-#define CPU_EVAL_THREADS 8
-#endif
+// Number of CPU worker threads (set via -DCPU_EVAL_THREADS=N at compile time, or defaults in evaluator.h)
 
 double eval_op(int op, double val1, double val2)
 {

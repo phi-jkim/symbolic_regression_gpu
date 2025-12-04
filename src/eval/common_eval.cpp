@@ -23,7 +23,7 @@ int run_evolution_benchmark_stateless(int start_gen, int end_gen, const std::str
         std::string filename = data_dir + "/gen_" + std::to_string(start_gen) + ".txt";
         InputInfo info = parse_input_info(filename);
         if (info.num_exprs > 0 && info.has_shared_data) {
-            std::cout << "Pre-loading shared data from " << info.data_filenames[0] << "..." << std::endl;
+            // std::cout << "Pre-loading shared data from " << info.data_filenames[0] << "..." << std::endl;
             shared_data_ptr = load_data_file(info.data_filenames[0], info.num_vars[0], info.num_dps[0]);
             shared_num_vars = info.num_vars[0];
             shared_num_dps = info.num_dps[0];
@@ -87,11 +87,11 @@ int run_evolution_benchmark_stateless(int start_gen, int end_gen, const std::str
     
     // Free shared data at the end
     if (shared_data_ptr != nullptr) {
-        std::cout << "Freeing shared data..." << std::endl;
+        // std::cout << "Freeing shared data..." << std::endl;
         for(int i=0; i<=shared_num_vars; i++) free(shared_data_ptr[i]);
         free(shared_data_ptr);
     }
     
-    std::cout << "Total Evolution Time: " << total_time_ms << " ms" << std::endl;
+    std::cout << "### Total Evolution Time: " << total_time_ms << " ms ###" << std::endl;
     return 0;
 }

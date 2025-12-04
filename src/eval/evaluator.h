@@ -7,6 +7,11 @@
 // The actual implementation (CPU or GPU) is selected at compile time
 // via USE_CPU_SIMPLE, USE_CPU_MULTI, USE_GPU_SIMPLE, USE_GPU_JINHA, or USE_GPU_ASYNC_JINHA preprocessor flags
 
+// Default number of threads for CPU evaluation
+#ifndef CPU_EVAL_THREADS
+#define CPU_EVAL_THREADS 8
+#endif
+
 #if defined(USE_GPU_ASYNC_JINHA)
     // GPU async double-buffer evaluation (defined in gpu_async_jinha.cu)
     void eval_async_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics);

@@ -91,8 +91,7 @@ def mutate(node, num_vars):
         new_node.right = mutate(node.right, num_vars)
     return new_node
 
-def generate_data(num_generations=5, pop_size=100, num_vars=5, num_dps=100000):
-    output_dir = "data/evolution"
+def generate_data(num_generations=5, pop_size=100, num_vars=5, num_dps=100000, output_dir="data/evolution"):
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
@@ -146,6 +145,18 @@ def generate_data(num_generations=5, pop_size=100, num_vars=5, num_dps=100000):
         
         population = new_pop
 
+import argparse
+
 if __name__ == "__main__":
-    random.seed(42)
-    generate_data()
+    parser = argparse.ArgumentParser(description="Generate evolution data for symbolic regression benchmark")
+    parser.add_argument("--gens", type=int, default=5, help="Number of generations")
+    parser.add_argument("--pop", type=int, default=100, help="Population size")
+    parser.add_argument("--vars", type=int, default=5, help="Number of variables")
+    parser.add_argument("--dps", type=int, default=100000, help="Number of data points")
+    parser.add_argument("--out", type=str, default="data/evolution", help="Output directory")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    
+    args = parser.parse_args()
+    
+    random.seed(args.seed)
+    generate_data(num_generations=args.gens, pop_size=args.pop, num_vars=args.vars, num_dps=args.dps, output_dir=args.out)
