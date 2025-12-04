@@ -374,9 +374,12 @@ def mutate_expression_conservative(expr, var_names: List[str], rng) -> sp.Expr:
             # Perturb constant by ±10%
             val = float(node)
             if val != 0:
-                perturbation = rng.uniform(-0.1, 0.1)
-                new_val = val * (1 + perturbation)
-                return sp.Float(new_val)
+                is_int = float(val).is_integer()
+                # Perturb if not integer, OR if integer with 10% probability
+                if not is_int or rng.random() < 0.1:
+                    perturbation = rng.uniform(-0.1, 0.1)
+                    new_val = val * (1 + perturbation)
+                    return sp.Float(new_val)
             return node
         elif node.is_Function or node.is_Pow or node.is_Add or node.is_Mul:
             # Recurse on children
@@ -398,9 +401,12 @@ def mutate_expression_medium(expr, var_names: List[str], rng) -> sp.Expr:
             # Perturb constant by ±30%
             val = float(node)
             if val != 0:
-                perturbation = rng.uniform(-0.3, 0.3)
-                new_val = val * (1 + perturbation)
-                return sp.Float(new_val)
+                is_int = float(val).is_integer()
+                # Perturb if not integer, OR if integer with 10% probability
+                if not is_int or rng.random() < 0.1:
+                    perturbation = rng.uniform(-0.3, 0.3)
+                    new_val = val * (1 + perturbation)
+                    return sp.Float(new_val)
             return node
         elif node.is_Add and rng.random() < 0.15:
             # 15% chance: flip Add to Mul
@@ -441,9 +447,12 @@ def mutate_expression_aggressive(expr, var_names: List[str], rng) -> sp.Expr:
             # Perturb constant by ±50%
             val = float(node)
             if val != 0:
-                perturbation = rng.uniform(-0.5, 0.5)
-                new_val = val * (1 + perturbation)
-                return sp.Float(new_val)
+                is_int = float(val).is_integer()
+                # Perturb if not integer, OR if integer with 10% probability
+                if not is_int or rng.random() < 0.1:
+                    perturbation = rng.uniform(-0.5, 0.5)
+                    new_val = val * (1 + perturbation)
+                    return sp.Float(new_val)
             else:
                 # Replace zero with small random constant
                 if rng.random() < 0.2:

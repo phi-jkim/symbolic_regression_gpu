@@ -134,6 +134,20 @@ void evaluate_and_save_results(const std::string& digest_file, InputInfo& input_
                                 int num_benchmark_runs = 1,
                                 int warmup_runs = 0);
 
+// Callback for evaluating a single generation in evolution benchmark
+// state: Opaque pointer for evaluator-specific state (e.g., SubtreeCache)
+typedef std::function<void(InputInfo&, double***, double**, void* state)> EvalGenCallback;
+
+// Unified Evolution Benchmark Runner
+// Handles shared data loading and generation loop
+int evaluate_evolution_benchmark(
+    int start_gen, 
+    int end_gen, 
+    const std::string& data_dir,
+    EvalGenCallback eval_func,
+    void* state = nullptr
+);
+
 // Free result info
 void free_result_info(ResultInfo& info);
 void free_aggregated_results(AggregatedResults& results);
