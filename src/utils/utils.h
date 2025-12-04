@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <functional>
 
 // ============================================================================
 // Common Constants

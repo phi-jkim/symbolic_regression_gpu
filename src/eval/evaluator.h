@@ -46,6 +46,9 @@
     // GPU evaluation using multi-expression batch kernel (defined in gpu_simple_jinha.cu)
     void eval_batch_multi_expression_single_kernel(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics);
     #define eval_batch eval_batch_multi_expression_single_kernel
+    
+    // Stateless evolution benchmark (defined in common_eval.cpp)
+    int run_evolution_benchmark_stateless(int start_gen, int end_gen, const std::string& data_dir);
 #elif defined(USE_GPU_JINHA)
     // GPU evaluation using eval_tree.cu library (defined in gpu_simple_jinha.cu)
     void eval_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics);
@@ -81,6 +84,13 @@
     // CPU single-threaded evaluation function (defined in cpu_simple_single.cpp)
     void eval_cpu_batch(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics);
     #define eval_batch eval_cpu_batch
+    
+    // Stateless evolution benchmark (defined in common_eval.cpp)
+    int run_evolution_benchmark_stateless(int start_gen, int end_gen, const std::string& data_dir);
+#elif defined(USE_GPU_SUBTREE)
+    // GPU Subtree Evaluator (defined in gpu_subtree.cu)
+    void eval_gpu_subtree_batch_stateless(InputInfo &input_info, double ***all_vars, double **all_predictions, EvalMetrics* metrics);
+    #define eval_batch eval_gpu_subtree_batch_stateless
     
     // Stateless evolution benchmark (defined in common_eval.cpp)
     int run_evolution_benchmark_stateless(int start_gen, int end_gen, const std::string& data_dir);
