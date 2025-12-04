@@ -60,7 +60,12 @@ run_test: test
 run_bench: bench
 
 # ============================================================================
-# CPU Evaluation Targets (for Feynman equation evaluation)
+# CPU Build All Target
+# ============================================================================
+all_cpu: cpu_eval cpu_multi_eval cpu_common
+
+# ============================================================================
+# CPU Single-threaded Evaluation Targets
 # ============================================================================
 CXX = g++
 CXXFLAGS = -std=c++11 -O3 -Wall -pthread
@@ -70,12 +75,14 @@ CPU_EVAL_BIN = $(BUILD_DIR)/cpu_eval
 UTILS_SRC = src/utils/utils.cpp src/utils/detect.cpp
 UTILS_HDR = src/utils/utils.h src/utils/detect.h
 MAIN_SRC = src/main.cpp
-CPU_EVAL_SRC = src/eval/cpu_simple_single.cpp
+CPU_EVAL_SRC = src/eval/cpu_simple_single.cpp src/eval/common_eval.cpp
 EVALUATOR_HDR = src/eval/evaluator.h
 
 $(CPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(CPU_EVAL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -DUSE_CPU_SIMPLE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_EVAL_SRC)
+
+cpu_eval: $(CPU_EVAL_BIN)
 
 # Test with single expression
 run_cpu_eval_single: $(CPU_EVAL_BIN)
@@ -117,7 +124,7 @@ cpu_common: $(CPU_COMMON_BIN)
 # CPU Multi-threaded Evaluation Targets
 # ============================================================================
 CPU_MULTI_EVAL_BIN = $(BUILD_DIR)/cpu_multi_eval
-CPU_MULTI_EVAL_SRC = src/eval/cpu_simple_multi.cpp
+CPU_MULTI_EVAL_SRC = src/eval/cpu_simple_multi.cpp src/eval/common_eval.cpp
 
 # Number of CPU worker threads (configurable at compile time)
 CPU_EVAL_THREADS ?= 8
@@ -125,6 +132,8 @@ CPU_EVAL_THREADS ?= 8
 $(CPU_MULTI_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(CPU_MULTI_EVAL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -DUSE_CPU_MULTI -DCPU_EVAL_THREADS=$(CPU_EVAL_THREADS) -o $@ $(MAIN_SRC) $(UTILS_SRC) $(CPU_MULTI_EVAL_SRC)
+
+cpu_multi_eval: $(CPU_MULTI_EVAL_BIN)
 
 # Test with single expression
 run_cpu_multi_eval_single: $(CPU_MULTI_EVAL_BIN)

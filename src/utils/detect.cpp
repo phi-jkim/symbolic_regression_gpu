@@ -79,12 +79,13 @@ struct SubtreeCandidate {
     int expr_id;
     int start_idx;
     int size;
+    uint64_t hash;
 };
 
 SubtreeDetectionResult detect_common_subtrees(
     int num_exprs,
     int num_vars,
-    const int* num_tokens,
+    int* num_tokens,
     const int** tokens,
     const double** values,
     int min_subtree_size,
@@ -236,6 +237,171 @@ SubtreeDetectionResult detect_common_subtrees(
     }
     
     result.analysis_time_ms = clock_to_ms(start, measure_clock());
+    
+    return result;
+}
+
+// Stateful detection: checks cache first, adds new common subtrees
+SubtreeDetectionResult detect_and_update_cache(
+    SubtreeCache& cache,
+    int num_exprs,
+    int num_features,
+    int* num_tokens,
+    const int** tokens,
+    const double** values,
+    int min_size,
+    int min_freq
+) {
+    SubtreeDetectionResult result;
+    result.num_exprs = num_exprs;
+    result.num_subs = 0; // Will be updated
+    result.sub_tokens = nullptr; // Not used in result for stateful (cache holds them)
+    result.sub_values = nullptr;
+    result.num_sub_tokens = nullptr;
+    result.sub_occ_expr = nullptr; // Not strictly needed for eval, but could be useful
+    result.sub_occ_idx = nullptr;
+    result.num_occurrences = nullptr;
+
+    // Allocate hints
+    result.expr_sub_hints = new int*[num_exprs];
+    for (int i = 0; i < num_exprs; i++) {
+        result.expr_sub_hints[i] = new int[num_tokens[i]];
+        // Initialize with -1 (no hint)
+        for (int j = 0; j < num_tokens[i]; j++) result.expr_sub_hints[i][j] = -1;
+    }
+
+    // Step 1: Hash all subtrees in current batch
+    // map: hash -> vector of candidates
+    std::map<uint64_t, std::vector<SubtreeCandidate>> hash_map;
+
+    for (int i = 0; i < num_exprs; i++) {
+        for (int j = 0; j < num_tokens[i]; j++) {
+            int size = compute_subtree_size(tokens[i], j, num_tokens[i]);
+            if (size >= min_size) {
+                uint64_t h = compute_hash(tokens[i], values[i], size);
+                hash_map[h].push_back({i, j, size, h});
+            }
+        }
+    }
+
+    // Step 2: Identify subtrees (both cached and new)
+    // We need to map local sub_id (for this batch) to cache_id
+    // But wait, the evaluator needs to know which cache index to use.
+    // So hints should store the CACHE ID directly.
+    
+    // Check existing cache hits
+    // int cache_hits = 0;
+    // int new_subs = 0;
+
+    // For new candidates, we need to filter by frequency
+    for (auto& pair : hash_map) {
+        uint64_t h = pair.first;
+        std::vector<SubtreeCandidate>& candidates = pair.second;
+
+        int cache_id = -1;
+        bool in_cache = false;
+
+        // Check if in cache
+        auto it = cache.hash_to_id.find(h);
+        if (it != cache.hash_to_id.end()) {
+            cache_id = it->second;
+            in_cache = true;
+            // cache_hits++;
+        } else {
+            // Not in cache, check frequency
+            if ((int)candidates.size() >= min_freq) {
+                // Add to cache!
+                cache_id = (int)cache.results.size();
+                cache.hash_to_id[h] = cache_id;
+                cache.results.push_back(nullptr); // Placeholder, will be allocated by evaluator
+                cache.ref_counts.push_back(0);
+                
+                // Store structure for verification/debugging
+                int size = candidates[0].size;
+                cache.sub_sizes.push_back(size);
+                
+                int* toks = new int[size];
+                double* vals = new double[size];
+                int expr_id = candidates[0].expr_id;
+                int start_idx = candidates[0].start_idx;
+                
+                for(int k=0; k<size; k++) {
+                    toks[k] = tokens[expr_id][start_idx + k];
+                    vals[k] = values[expr_id][start_idx + k];
+                }
+                cache.sub_tokens.push_back(toks);
+                cache.sub_values.push_back(vals);
+                
+                in_cache = true;
+                // new_subs++;
+            }
+        }
+
+        if (in_cache) {
+            // Mark hints for all occurrences
+            // We need to be careful about overlapping subtrees.
+            // Larger subtrees should take precedence? Or maybe just first found?
+            // The original logic sorted by size descending. We should do the same.
+            // But we are iterating by hash...
+            
+            // Let's defer marking until we have processed all hashes?
+            // Or just mark now and handle overlaps?
+            // The original logic: "Sort verified subtrees by size (descending)"
+            
+            // Current approach: We are iterating map, order is by hash (randomish).
+            // Better: Collect all valid (cached or new) candidates, sort by size, then mark.
+        }
+    }
+    
+    // Re-scan to collect all valid candidates (cached or new-high-freq)
+    std::vector<std::vector<SubtreeCandidate>> valid_groups;
+    
+    for (auto& pair : hash_map) {
+        uint64_t h = pair.first;
+        if (cache.hash_to_id.count(h)) {
+             valid_groups.push_back(pair.second);
+        }
+    }
+    
+    // Sort groups by subtree size (descending)
+    std::sort(valid_groups.begin(), valid_groups.end(), [](const std::vector<SubtreeCandidate>& a, const std::vector<SubtreeCandidate>& b) {
+        return a[0].size > b[0].size;
+    });
+    
+    // Mark hints
+    for (const auto& group : valid_groups) {
+        uint64_t h = group[0].hash;
+        int cache_id = cache.hash_to_id[h];
+        
+        for (const auto& cand : group) {
+            // Check if already marked (part of a larger subtree)
+            bool overlap = false;
+            for (int k = 0; k < cand.size; k++) {
+                if (result.expr_sub_hints[cand.expr_id][cand.start_idx + k] != -1) {
+                    overlap = true;
+                    break;
+                }
+            }
+            
+            if (!overlap) {
+                // Mark root with cache_id
+                result.expr_sub_hints[cand.expr_id][cand.start_idx] = cache_id;
+                // Mark body with -2
+                for (int k = 1; k < cand.size; k++) {
+                    result.expr_sub_hints[cand.expr_id][cand.start_idx + k] = -2;
+                }
+                
+                // Update ref count
+                cache.ref_counts[cache_id]++;
+            }
+        }
+    }
+    
+    // We don't populate result.sub_tokens etc because the evaluator will use the cache directly.
+    // But we need to tell the evaluator which cache entries are NEW and need computation.
+    // Actually, the evaluator can check if cache.results[id] is nullptr.
+    
+    result.num_subs = (int)cache.results.size(); // Total subtrees in cache
     
     return result;
 }

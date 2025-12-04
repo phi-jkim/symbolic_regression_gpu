@@ -1,3 +1,4 @@
+
 #include "utils/utils.h"
 #include "eval/evaluator.h"
 #include <iostream>
@@ -29,6 +30,26 @@ int main(int argc, char **argv)
         std::cerr << "  num_runs: number of measured eval runs (default: 5)" << std::endl;
         std::cerr << "  warmup_runs: number of warmup runs before measurement (default: 2)" << std::endl;
         return 1;
+    }
+
+    // Check for evolution mode
+    if (std::string(argv[1]) == "-evolution")
+    {
+        if (argc < 4)
+        {
+            std::cerr << "Usage: " << argv[0] << " -evolution <start_gen> <end_gen> [data_dir]" << std::endl;
+            return 1;
+        }
+        
+        int start_gen = atoi(argv[2]);
+        int end_gen = atoi(argv[3]);
+        std::string data_dir = (argc >= 5) ? argv[4] : "data/evolution";
+        
+#ifdef USE_CPU_SUBTREE
+        return run_evolution_benchmark(start_gen, end_gen, data_dir);
+#else
+        return run_evolution_benchmark_stateless(start_gen, end_gen, data_dir);
+#endif
     }
 
     std::string digest_file = argv[1];
