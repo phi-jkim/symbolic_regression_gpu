@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include <limits>
 #include "../utils/utils.h"
 #include "../utils/gpu_kernel.h"
 
@@ -548,6 +549,16 @@ void evolve(InputInfo &input_info,
             for (int dp = 0; dp < num_dps; ++dp) {
                 all_predictions[expr_idx][dp] = (double)h_out[dp];
             }
+            // For all other expressions, set predictions to NaN so that
+            // downstream statistics will treat them as invalid and skip
+            // them when forming aggregated averages.
+            for (int e = 0; e < input_info.num_exprs; ++e) {
+                if (e == expr_idx) continue;
+                int nd = input_info.num_dps[e];
+                for (int dp = 0; dp < nd; ++dp) {
+                    all_predictions[e][dp] = std::numeric_limits<double>::quiet_NaN();
+                }
+            }
         }
     }
 
@@ -624,7 +635,7 @@ void eval_evolve_jinha_batch(InputInfo &input_info,
 
 void evolve_multi_expressions_batch(InputInfo &input_info,
                                     double ***all_vars,
-                                    double ** /*all_predictions*/,
+                                    double **all_predictions,
                                     int expr_idx,
                                     int pop_size,
                                     int num_generations,
@@ -958,6 +969,30 @@ void evolve_multi_expressions_batch(InputInfo &input_info,
         kernel_times_accum->insert(kernel_times_accum->end(),
                                    kernel_times_ms.begin(),
                                    kernel_times_ms.end());
+    }
+
+    // ------------------------------------------------------------
+    // Write predictions for best individual (for expr_idx) and
+    // mark other expressions as NaN so they are ignored in
+    // aggregated accuracy metrics.
+    // ------------------------------------------------------------
+    if (all_predictions != nullptr && best_idx >= 0) {
+        // Fill predictions for the evolved best individual on expr_idx
+        const float *best_pred = &h_pred_batch[(size_t)best_idx * (size_t)num_dps];
+        for (int dp = 0; dp < num_dps; ++dp) {
+            all_predictions[expr_idx][dp] = static_cast<double>(best_pred[dp]);
+        }
+
+        // For all other expressions, set predictions to NaN so that
+        // downstream statistics will treat them as invalid and skip
+        // them when forming aggregated averages.
+        for (int e = 0; e < input_info.num_exprs; ++e) {
+            if (e == expr_idx) continue;
+            int nd = input_info.num_dps[e];
+            for (int dp = 0; dp < nd; ++dp) {
+                all_predictions[e][dp] = std::numeric_limits<double>::quiet_NaN();
+            }
+        }
     }
 
     // ------------------------------------------------------------

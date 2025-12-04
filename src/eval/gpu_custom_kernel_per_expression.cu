@@ -1213,6 +1213,7 @@ void evolve(InputInfo &input_info,
 
     float best_fitness = std::numeric_limits<float>::infinity();
     int   best_idx     = -1;
+    std::vector<float> best_pred(num_dps);
 
     std::vector<float> kernel_times_ms;
     std::vector<float> compile_times_ms;
@@ -1321,6 +1322,9 @@ void evolve(InputInfo &input_info,
                 if ((float)mse < best_fitness) {
                     best_fitness = (float)mse;
                     best_idx     = pop_i;
+                    for (int dp = 0; dp < num_dps; ++dp) {
+                        best_pred[dp] = preds[dp];
+                    }
                 }
             }
         }
@@ -1367,44 +1371,24 @@ void evolve(InputInfo &input_info,
     // summarize_times(compile_times_ms, "[evolve] compile time (C++->PTX NVRTC)");
     // summarize_times(jit_times_ms,     "[evolve] JIT time (PTX->GPU binary)");
 
-    // if (best_idx >= 0) {
-    //     const float   *val_i  = &h_pop_val[(size_t)best_idx * (size_t)maxGPLen];
-    //     const int16_t *type_i = &h_pop_type[(size_t)best_idx * (size_t)maxGPLen];
-    //     const int16_t *sub_i  = &h_pop_size[(size_t)best_idx * (size_t)maxGPLen];
+    // ------------------------------------------------------------
+    // Write predictions for best individual (for expr_idx) and
+    // mark other expressions as NaN so they are ignored in
+    // aggregated accuracy metrics.
+    // ------------------------------------------------------------
+    if (all_predictions != nullptr && best_idx >= 0) {
+        for (int dp = 0; dp < num_dps; ++dp) {
+            all_predictions[expr_idx][dp] = static_cast<double>(best_pred[dp]);
+        }
 
-    //     int len = (int)sub_i[0];
-    //     if (len > 0 && len <= maxGPLen) {
-    //         for (int t = 0; t < len; ++t) {
-    //             int16_t node_type = (int16_t)(type_i[t] & NodeType::TYPE_MASK);
-    //             float   node_val  = val_i[t];
-    //             if (node_type == NodeType::CONST) {
-    //                 h_tokens[t] = TOK_CONST;
-    //                 h_values[t] = node_val;
-    //             } else if (node_type == NodeType::VAR) {
-    //                 h_tokens[t] = TOK_VAR;
-    //                 h_values[t] = node_val;
-    //             } else {
-    //                 h_tokens[t] = (int)node_val;
-    //                 h_values[t] = 0.0f;
-    //             }
-    //         }
-    //         std::vector<float> h_best_out(num_dps);
-    //         eval_expr_straightline_gpu(
-    //             h_tokens.data(),
-    //             h_values.data(),
-    //             len,
-    //             d_X,
-    //             varLen,
-    //             num_dps,
-    //             d_out_multi);
-
-    //         CUDA_CHECK(cudaMemcpy(h_best_out.data(), d_out_multi,
-    //                               (size_t)num_dps * sizeof(float), cudaMemcpyDeviceToHost));
-    //         for (int dp = 0; dp < num_dps; ++dp) {
-    //             all_predictions[expr_idx][dp] = (double)h_best_out[dp];
-    //         }
-    //     }
-    // }
+        for (int e = 0; e < input_info.num_exprs; ++e) {
+            if (e == expr_idx) continue;
+            int nd = input_info.num_dps[e];
+            for (int dp = 0; dp < nd; ++dp) {
+                all_predictions[e][dp] = std::numeric_limits<double>::quiet_NaN();
+            }
+        }
+    }
 
     cudaFree(d_out_multi);
     cudaFree(d_X);

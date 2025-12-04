@@ -3,6 +3,8 @@
 
 #include "../utils/utils.h"
 
+int run_evolution_benchmark_stateless(int start_gen, int end_gen, const std::string& data_dir);
+
 // Unified evaluation interface
 // The actual implementation (CPU or GPU) is selected at compile time
 // via USE_CPU_SIMPLE, USE_CPU_MULTI, USE_GPU_SIMPLE, USE_GPU_JINHA, or USE_GPU_ASYNC_JINHA preprocessor flags

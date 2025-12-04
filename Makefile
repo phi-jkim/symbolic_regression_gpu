@@ -180,9 +180,10 @@ GPU_ARCH ?= sm_89
 NVCCFLAGS = -std=c++17 -O3 -arch=$(GPU_ARCH) \
 	-Wno-deprecated-gpu-targets -Xptxas -v
 
-$(GPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_EVAL_SRC) $(EVALUATOR_HDR)
+
+$(GPU_EVAL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_EVAL_SRC) src/eval/common_eval.cpp $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_SIMPLE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVAL_SRC)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_SIMPLE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVAL_SRC) src/eval/common_eval.cpp
 
 # Test with single expression
 run_gpu_eval_single: $(GPU_EVAL_BIN)
@@ -210,20 +211,24 @@ GPU_EVOLVE_SIMPLE_BIN = $(BUILD_DIR)/gpu_evolve_simple
 GPU_EVOLVE_SIMPLE_SRC = src/eval/gpu_simple.cu
 
 
-$(GPU_EVOLVE_SIMPLE_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_EVOLVE_SIMPLE_SRC) src/utils/generate.cu $(EVALUATOR_HDR)
-	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_EVOLVE_SIMPLE -o $@ \
-		$(MAIN_SRC) $(UTILS_SRC) $(GPU_EVOLVE_SIMPLE_SRC) src/utils/generate.cu
 
+$(GPU_EVOLVE_SIMPLE_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_EVOLVE_SIMPLE_SRC) src/eval/common_eval.cpp src/utils/generate.cu $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_EVOLVE_SIMPLE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVOLVE_SIMPLE_SRC) src/eval/common_eval.cpp src/utils/generate.cu
+
+# Test with single expression
 run_gpu_evolve_simple_single: $(GPU_EVOLVE_SIMPLE_BIN)
 	$(GPU_EVOLVE_SIMPLE_BIN) data/ai_feyn/singles/input_001.txt
 
+# Test with multiple expressions
 run_gpu_evolve_simple_multi: $(GPU_EVOLVE_SIMPLE_BIN)
 	$(GPU_EVOLVE_SIMPLE_BIN) data/ai_feyn/multi/input_100_100k.txt
 
+# Test with sample input (2 expressions, 1000 data points each)
 run_gpu_evolve_simple_sample: $(GPU_EVOLVE_SIMPLE_BIN)
 	$(GPU_EVOLVE_SIMPLE_BIN) data/examples/sample_input.txt
 
+# Default run target (single expression)
 run_gpu_evolve_simple: run_gpu_evolve_simple_sample
 
 # ============================================================================
@@ -232,10 +237,9 @@ run_gpu_evolve_simple: run_gpu_evolve_simple_sample
 GPU_JINHA_BATCH_BIN = $(BUILD_DIR)/gpu_jinha_batch_eval
 GPU_JINHA_BATCH_SRC = src/eval/gpu_simple_jinha.cu
 
-$(GPU_JINHA_BATCH_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_JINHA_BATCH_SRC) $(EVALUATOR_HDR)
+$(GPU_JINHA_BATCH_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_JINHA_BATCH_SRC) src/eval/common_eval.cpp $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA_MULTI_EXPRESSION_BATCH -o $@ \
-		$(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_BATCH_SRC) $(UTILS_CU_SRC)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA_MULTI_EXPRESSION_BATCH -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_BATCH_SRC) src/eval/common_eval.cpp $(UTILS_CU_SRC)
 
 # Test with single expression (batch kernel)
 run_gpu_jinha_batch_single: $(GPU_JINHA_BATCH_BIN)
@@ -267,10 +271,9 @@ GPU_JINHA_BIN = $(BUILD_DIR)/gpu_jinha_eval
 GPU_JINHA_SRC = src/eval/gpu_simple_jinha.cu
 UTILS_CU_SRC = src/utils/utils.cu
 
-$(GPU_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_JINHA_SRC) $(EVALUATOR_HDR)
+$(GPU_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_JINHA_SRC) src/eval/common_eval.cpp $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA -o $@ \
-		$(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_SRC) $(UTILS_CU_SRC)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_SRC) src/eval/common_eval.cpp $(UTILS_CU_SRC)
 
 # Test with single expression
 run_gpu_jinha_eval_single: $(GPU_JINHA_BIN)
@@ -302,10 +305,9 @@ GPU_EVOLVE_JINHA_BIN = $(BUILD_DIR)/gpu_evolve_jinha_eval
 GPU_EVOLVE_JINHA_SRC = src/eval/gpu_simple_jinha_with_evolve.cu
 EVOLVE_KERNEL_SRC = src/utils/generate.cu src/utils/mutation.cu src/utils/crossover.cu
 
-$(GPU_EVOLVE_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_EVOLVE_JINHA_SRC) $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
+$(GPU_EVOLVE_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_EVOLVE_JINHA_SRC) src/eval/common_eval.cpp $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_EVOLVE_JINHA -o $@ \
-		$(MAIN_SRC) $(UTILS_SRC) $(GPU_EVOLVE_JINHA_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_EVOLVE_JINHA -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVOLVE_JINHA_SRC) src/eval/common_eval.cpp $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC)
 
 # PTX output for gpu_evolve_jinha_eval (for sanity checking)
 GPU_EVOLVE_JINHA_PTX = $(BUILD_DIR)/gpu_evolve_jinha_eval.ptx
@@ -343,10 +345,9 @@ run_gpu_evolve_jinha_eval_100k_mutations: $(GPU_EVOLVE_JINHA_BIN)
 # ============================================================================
 GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN = $(BUILD_DIR)/gpu_evolve_jinha_batch_multi_expressions_single_kernel_eval
 
-$(GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_EVOLVE_JINHA_SRC) $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
+$(GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_EVOLVE_JINHA_SRC) src/eval/common_eval.cpp $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_EVOLVE_JINHA_MULTI_EXPRS -o $@ \
-		$(MAIN_SRC) $(UTILS_SRC) $(GPU_EVOLVE_JINHA_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_EVOLVE_JINHA_MULTI_EXPRS -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_EVOLVE_JINHA_SRC) src/eval/common_eval.cpp $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC)
 
 # Test with single expression (multi-expressions batch single kernel)
 run_gpu_evolve_jinha_batch_multi_expressions_single_kernel_single: $(GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN)
@@ -369,10 +370,9 @@ run_gpu_evolve_jinha_batch_multi_expressions_single_kernel: run_gpu_evolve_jinha
 GPU_CUSTOM_PEREXPR_BIN = $(BUILD_DIR)/gpu_custom_kernel_perexpression_evolve
 GPU_CUSTOM_PEREXPR_SRC = src/eval/gpu_custom_kernel_per_expression.cu
 
-$(GPU_CUSTOM_PEREXPR_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
+$(GPU_CUSTOM_PEREXPR_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_CUSTOM_PEREXPR_SRC) src/eval/common_eval.cpp $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_CUSTOM_PEREXPR_EVOLVE -o $@ \
-		$(MAIN_SRC) $(UTILS_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC) \
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_CUSTOM_PEREXPR_EVOLVE -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_CUSTOM_PEREXPR_SRC) src/eval/common_eval.cpp $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC) \
 		-lnvrtc -lcuda
 
 # Test with single expression (evolve)
@@ -395,18 +395,16 @@ run_gpu_custom_kernel_perexpression_evolve: run_gpu_custom_kernel_perexpression_
 # =========================================================================
 GPU_CUSTOM_PEREXPR_MULTI_BIN = $(BUILD_DIR)/gpu_custom_kernel_perexpression_multi
 
-$(GPU_CUSTOM_PEREXPR_MULTI_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
+$(GPU_CUSTOM_PEREXPR_MULTI_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_CUSTOM_PEREXPR_SRC) src/eval/common_eval.cpp $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_CUSTOM_PEREXPR_MULTI -o $@ \
-		$(MAIN_SRC) $(UTILS_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC) \
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_CUSTOM_PEREXPR_MULTI -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_CUSTOM_PEREXPR_SRC) src/eval/common_eval.cpp $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC) \
 		-lnvrtc -lcuda
 
 GPU_CUSTOM_PEREXPR_MULTI_NVRTC_BIN = $(BUILD_DIR)/gpu_custom_kernel_perexpression_multi_nvrtc
 
-$(GPU_CUSTOM_PEREXPR_MULTI_NVRTC_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
+$(GPU_CUSTOM_PEREXPR_MULTI_NVRTC_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_CUSTOM_PEREXPR_SRC) src/eval/common_eval.cpp $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_CUSTOM_PEREXPR_MULTI_NVRTC -o $@ \
-		$(MAIN_SRC) $(UTILS_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC) \
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_CUSTOM_PEREXPR_MULTI_NVRTC -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_CUSTOM_PEREXPR_SRC) src/eval/common_eval.cpp $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC) \
 		-lnvrtc -lcuda
 
 # Test with single expression (non-evolve custom per-expression)
@@ -449,10 +447,9 @@ compare_evals: $(CPU_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_JINHA_BIN)
 GPU_ASYNC_JINHA_BIN = $(BUILD_DIR)/gpu_async_jinha_eval
 GPU_ASYNC_JINHA_SRC = src/eval/gpu_async_jinha.cu
 
-$(GPU_ASYNC_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_ASYNC_JINHA_SRC) $(EVALUATOR_HDR)
+$(GPU_ASYNC_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_ASYNC_JINHA_SRC) src/eval/common_eval.cpp $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_ASYNC_JINHA -o $@ \
-		$(MAIN_SRC) $(UTILS_SRC) $(GPU_ASYNC_JINHA_SRC) $(UTILS_CU_SRC)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_ASYNC_JINHA -o $@ $(MAIN_SRC) $(UTILS_SRC) $(GPU_ASYNC_JINHA_SRC) src/eval/common_eval.cpp $(UTILS_CU_SRC)
 
 # Test with single expression
 run_gpu_async_jinha_eval_single: $(GPU_ASYNC_JINHA_BIN)

@@ -1297,7 +1297,7 @@ __device__ inline float eval_tree_device(const int* tokens, const float* values,
                 float b = stk[--sp];
                 // --sp; 
                 // float b = 0.0; 
-                stk[sp++] = apply_op(tok, a, b);
+                stk[sp++] = apply_op(1, a, b);
                 // sp++; 
                 // stk[sp++] = 0; 
             } else { // unary
@@ -1323,6 +1323,63 @@ __device__ inline float eval_tree_device(const int* tokens, const float* values,
     // return 0.0f; 
     // return sp + tok; 
 }
+
+// __device__ inline float eval_tree_device(const int* tokens, const float* values, const float* x, int len, int num_features) {
+//     float stk[MAX_EVAL_STACK];
+//     int sp = 0;
+//     int output = 0; 
+//     float tmp = 1000; 
+
+    
+//     for (int i = len - 1; i >= 0; i--) {
+//         int tok = tokens[i];
+//         if (tok > 0) { // operator
+
+//             int arity = op_arity(tok);
+//             if (arity == 2) {
+//                 float a = stk[--sp];
+//                 // sp--;
+//                 // float a = 0.0; 
+//                 float b = stk[--sp]; 
+//                 // sp--; 
+//                 // if (a > b) { 
+//                 //     stk[sp++] = 1.0f;
+//                 // } else { 
+//                 //     stk[sp++] = 0.0f;
+//                 // }
+//                 // float b = 0.0; 
+//                 // tmp = apply_op(tok, tmp, tmp);
+//                 tmp = a + b;
+//                 stk[sp++] = tmp; 
+//                 // sp++; 
+//             } else { // unary
+//                 float a = stk[--sp]; 
+//                 // sp--;
+//                 // if (a > 3) { 
+//                 //     stk[sp++] = 1.0f;
+//                 // } else {
+//                 //     stk[sp++] = 0.0f;
+//                 // }
+//                 // tmp = apply_op(tok, a, a);
+//                 tmp = tmp + a;
+//                 stk[sp++] = tmp;
+//                 // sp++; 
+//             }
+//         } else if (tok == 0) { // constant
+//             // stk[sp++] = values[i];
+//             tmp = values[i]; 
+//             stk[sp++] = tmp;
+//             // sp++;
+//         } else if (tok == -1) { // variable
+//             // stk[sp++] = x[(int)values[i]];
+//             tmp = x[(int)values[i]];
+//             stk[sp++] = tmp;
+//             // sp++;
+//         }
+//     }
+//     // return stk[--sp];
+//     return  sp + tmp + stk[--sp]; 
+// }
 
 // GPU kernel: Each threadblock handles multiple expressions and subset of datapoints
 __global__ void eval_prefix_kernel_multi_expression_batch(
