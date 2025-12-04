@@ -960,6 +960,133 @@ static double eval_multi_expr_straightline_gpu(
     return launch_ms;
 }
 
+// NVRTC-based multi-expression straight-line kernel (C++ -> PTX)
+static double eval_multi_expr_straightline_gpu_nvrtc(
+    const std::vector<ExprDesc>& exprs,
+    const float*                 d_X,
+    int                          num_features,
+    int                          num_dps,
+    float*                       d_out,
+    double*                      compile_ms_p,
+    double*                      jit_ms_p)
+{
+    if (exprs.empty()) return 0.0;
+
+    using clock_t = std::chrono::high_resolution_clock;
+
+    auto t_build_start = clock_t::now();
+    std::string src = build_multi_expr_kernel_src(exprs, num_features);
+    auto t_build_end = clock_t::now();
+    double build_ms = std::chrono::duration<double, std::milli>(
+        t_build_end - t_build_start).count();
+
+    auto t_nvrtc_start = clock_t::now();
+
+    nvrtcProgram prog;
+    NVRTC_CHECK(nvrtcCreateProgram(
+        &prog,
+        src.c_str(),
+        "multi_expr.cu",
+        0,
+        nullptr,
+        nullptr));
+
+    const char* opts[] = {
+        "--std=c++17",
+        "--gpu-architecture=compute_89",
+        "-Isrc/utils"
+    };
+    nvrtcResult compile_res = nvrtcCompileProgram(prog, 3, opts);
+
+    size_t logSize = 0;
+    nvrtcGetProgramLogSize(prog, &logSize);
+    if (logSize > 1) {
+        std::string log(logSize, '\0');
+        nvrtcGetProgramLog(prog, &log[0]);
+        fprintf(stderr, "[multi-expr-nvrtc] NVRTC log:\n%s\n", log.c_str());
+    }
+    if (compile_res != NVRTC_SUCCESS) {
+        fprintf(stderr, "[multi-expr-nvrtc] NVRTC compilation failed.\n");
+        nvrtcDestroyProgram(&prog);
+        exit(EXIT_FAILURE);
+    }
+
+    size_t ptxSize = 0;
+    NVRTC_CHECK(nvrtcGetPTXSize(prog, &ptxSize));
+    std::string ptx(ptxSize, '\0');
+    NVRTC_CHECK(nvrtcGetPTX(prog, &ptx[0]));
+    NVRTC_CHECK(nvrtcDestroyProgram(&prog));
+
+    auto t_nvrtc_end = clock_t::now();
+    double nvrtc_ms = std::chrono::duration<double, std::milli>(
+        t_nvrtc_end - t_nvrtc_start).count();
+
+    CUdevice  cuDevice;
+    CUcontext cuContext;
+    CU_CHECK(cuInit(0));
+    CU_CHECK(cuDeviceGet(&cuDevice, 0));
+    CU_CHECK(cuCtxGetCurrent(&cuContext));
+    if (!cuContext) {
+        CU_CHECK(cuCtxCreate(&cuContext, 0, cuDevice));
+    }
+
+    CUmodule   module;
+    CUfunction func;
+
+    auto t_jit_start = clock_t::now();
+
+    CU_CHECK(cuModuleLoadData(&module, ptx.c_str()));
+    CU_CHECK(cuModuleGetFunction(&func, module, "eval_multi_expr_kernel"));
+
+    auto t_jit_end = clock_t::now();
+    double jit_ms = std::chrono::duration<double, std::milli>(
+        t_jit_end - t_jit_start).count();
+
+    int num_exprs_i = static_cast<int>(exprs.size());
+    void* args[] = {
+        (void*)&d_X,
+        (void*)&num_features,
+        (void*)&num_dps,
+        (void*)&num_exprs_i,
+        (void*)&d_out
+    };
+
+    int threads = 128;
+    int blocks  = (num_dps + threads - 1) / threads;
+
+    auto t_launch_start = clock_t::now();
+
+    CU_CHECK(cuLaunchKernel(
+        func,
+        blocks, 1, 1,
+        threads, 1, 1,
+        0,
+        0,
+        args,
+        nullptr));
+
+    CU_CHECK(cuCtxSynchronize());
+    CU_CHECK(cuModuleUnload(module));
+
+    auto t_launch_end = clock_t::now();
+    double launch_ms = std::chrono::duration<double, std::milli>(
+        t_launch_end - t_launch_start).count();
+
+    fprintf(stderr,
+            "[multi-expr-nvrtc] timings: build_src=%g ms, C++->PTX NVRTC=%g ms, PTX->SASS JIT=%g ms, launch+sync=%g ms (num_exprs=%d, num_dps=%d)\n",
+            build_ms,
+            nvrtc_ms,
+            jit_ms,
+            launch_ms,
+            num_exprs_i,
+            num_dps);
+
+    if (compile_ms_p) *compile_ms_p = build_ms + nvrtc_ms;
+    if (jit_ms_p)     *jit_ms_p     = jit_ms;
+
+    return launch_ms;
+}
+
 // ============================================================================
 //  Evolution path using single-expression codegen (unchanged below)
 // ============================================================================
@@ -1165,6 +1292,14 @@ void evolve(InputInfo &input_info,
                 d_out_multi,
                 &compile_ms,
                 &jit_ms);
+            // double launch_ms = eval_multi_expr_straightline_gpu_nvrtc(
+            //     exprs,
+            //     d_X,
+            //     varLen,
+            //     num_dps,
+            //     d_out_multi,
+            //     &compile_ms,
+            //     &jit_ms);
             kernel_times_ms.push_back((float)launch_ms);
             compile_times_ms.push_back((float)compile_ms);
             jit_times_ms.push_back((float)jit_ms);
@@ -1228,47 +1363,48 @@ void evolve(InputInfo &input_info,
                 (double)mean_excl_first_ms, n, n_excl);
     };
 
-    summarize_times(kernel_times_ms,  "[evolve] kernel time (launch+sync)");
-    summarize_times(compile_times_ms, "[evolve] compile time (C++->PTX NVRTC)");
+    // summarize_times(kernel_times_ms,  "[evolve] kernel time (launch+sync)");
+    // summarize_times(compile_times_ms, "[evolve] compile time (C++->PTX NVRTC)");
+    // summarize_times(jit_times_ms,     "[evolve] JIT time (PTX->GPU binary)");
 
-    if (best_idx >= 0) {
-        const float   *val_i  = &h_pop_val[(size_t)best_idx * (size_t)maxGPLen];
-        const int16_t *type_i = &h_pop_type[(size_t)best_idx * (size_t)maxGPLen];
-        const int16_t *sub_i  = &h_pop_size[(size_t)best_idx * (size_t)maxGPLen];
+    // if (best_idx >= 0) {
+    //     const float   *val_i  = &h_pop_val[(size_t)best_idx * (size_t)maxGPLen];
+    //     const int16_t *type_i = &h_pop_type[(size_t)best_idx * (size_t)maxGPLen];
+    //     const int16_t *sub_i  = &h_pop_size[(size_t)best_idx * (size_t)maxGPLen];
 
-        int len = (int)sub_i[0];
-        if (len > 0 && len <= maxGPLen) {
-            for (int t = 0; t < len; ++t) {
-                int16_t node_type = (int16_t)(type_i[t] & NodeType::TYPE_MASK);
-                float   node_val  = val_i[t];
-                if (node_type == NodeType::CONST) {
-                    h_tokens[t] = TOK_CONST;
-                    h_values[t] = node_val;
-                } else if (node_type == NodeType::VAR) {
-                    h_tokens[t] = TOK_VAR;
-                    h_values[t] = node_val;
-                } else {
-                    h_tokens[t] = (int)node_val;
-                    h_values[t] = 0.0f;
-                }
-            }
-            std::vector<float> h_best_out(num_dps);
-            eval_expr_straightline_gpu(
-                h_tokens.data(),
-                h_values.data(),
-                len,
-                d_X,
-                varLen,
-                num_dps,
-                d_out_multi);
+    //     int len = (int)sub_i[0];
+    //     if (len > 0 && len <= maxGPLen) {
+    //         for (int t = 0; t < len; ++t) {
+    //             int16_t node_type = (int16_t)(type_i[t] & NodeType::TYPE_MASK);
+    //             float   node_val  = val_i[t];
+    //             if (node_type == NodeType::CONST) {
+    //                 h_tokens[t] = TOK_CONST;
+    //                 h_values[t] = node_val;
+    //             } else if (node_type == NodeType::VAR) {
+    //                 h_tokens[t] = TOK_VAR;
+    //                 h_values[t] = node_val;
+    //             } else {
+    //                 h_tokens[t] = (int)node_val;
+    //                 h_values[t] = 0.0f;
+    //             }
+    //         }
+    //         std::vector<float> h_best_out(num_dps);
+    //         eval_expr_straightline_gpu(
+    //             h_tokens.data(),
+    //             h_values.data(),
+    //             len,
+    //             d_X,
+    //             varLen,
+    //             num_dps,
+    //             d_out_multi);
 
-            CUDA_CHECK(cudaMemcpy(h_best_out.data(), d_out_multi,
-                                  (size_t)num_dps * sizeof(float), cudaMemcpyDeviceToHost));
-            for (int dp = 0; dp < num_dps; ++dp) {
-                all_predictions[expr_idx][dp] = (double)h_best_out[dp];
-            }
-        }
-    }
+    //         CUDA_CHECK(cudaMemcpy(h_best_out.data(), d_out_multi,
+    //                               (size_t)num_dps * sizeof(float), cudaMemcpyDeviceToHost));
+    //         for (int dp = 0; dp < num_dps; ++dp) {
+    //             all_predictions[expr_idx][dp] = (double)h_best_out[dp];
+    //         }
+    //     }
+    // }
 
     cudaFree(d_out_multi);
     cudaFree(d_X);
@@ -1285,10 +1421,11 @@ void evolve(InputInfo &input_info,
 // Evolution-based batch entry point.
 void eval_evolve_jinha_batch(InputInfo &input_info,
                              double ***all_vars,
-                             double **all_predictions)
+                             double **all_predictions,
+                             EvalMetrics* metrics)
 {
-    const int pop_size        = 256;
-    const int num_generations = 5;
+    const int pop_size        = 1000;
+    const int num_generations = 1;
     const int maxGPLen        = 60;
     const unsigned int constSamplesLen = 8;
     const float outProb   = 0.0f;
@@ -1483,3 +1620,165 @@ void eval_multi_expr_ptx_batch(InputInfo &input_info,
     std::cout << "(Multi-expression PTX build & JIT times are logged by eval_multi_expr_straightline_gpu)" << std::endl;
 
 }
+
+// multi-expr NVRTC (C++->PTX) batch path for comparison
+void eval_multi_expr_nvrtc_batch(InputInfo &input_info,
+                                 double ***all_vars,
+                                 double **all_predictions,
+                                 EvalMetrics* metrics)
+{
+    double alloc_ms = 0.0;
+    double memcpy_h2d_ms_total = 0.0;
+    double memcpy_d2h_ms_total = 0.0;
+
+    const int num_exprs = input_info.num_exprs;
+    if (num_exprs <= 0) {
+        return;
+    }
+
+    if (!(input_info.has_shared_data && num_exprs > 1)) {
+        printf("Not multi expression and shared data exiting (NVRTC path)\n");
+        return;
+    }
+
+    const int num_tokens   = input_info.num_tokens[0];
+    const int num_vars     = input_info.num_vars[0];
+    const int num_dps      = input_info.num_dps[0];
+    const int num_features = num_vars + 1;
+
+    if (num_tokens <= 0 || num_dps <= 0 || num_features <= 0) {
+        return;
+    }
+
+    std::vector<ExprDesc> exprs;
+    exprs.reserve((size_t)num_exprs);
+
+    std::vector<int>   all_tokens;
+    std::vector<float> all_values;
+    all_tokens.reserve((size_t)input_info.max_tokens * (size_t)num_exprs);
+    all_values.reserve((size_t)input_info.max_tokens * (size_t)num_exprs);
+
+    for (int expr_id = 0; expr_id < num_exprs; ++expr_id) {
+        const int expr_tokens = input_info.num_tokens[expr_id];
+        if (expr_tokens <= 0) continue;
+
+        const int* tokens_host_ptr = nullptr;
+        std::vector<int> tokens_temp;
+        if (input_info.tokens_packed && input_info.tokens_packed[expr_id]) {
+            tokens_host_ptr = input_info.tokens_packed[expr_id];
+        } else {
+            tokens_temp.resize(expr_tokens);
+            for (int i = 0; i < expr_tokens; ++i) {
+                tokens_temp[i] = input_info.tokens[expr_id][i];
+            }
+            tokens_host_ptr = tokens_temp.data();
+        }
+
+        const float* values_host_ptr = nullptr;
+        std::vector<float> values_temp;
+        if (input_info.values_packed_f32 && input_info.values_packed_f32[expr_id]) {
+            values_host_ptr = input_info.values_packed_f32[expr_id];
+        } else {
+            values_temp.resize(expr_tokens);
+            for (int i = 0; i < expr_tokens; ++i) {
+                values_temp[i] = (float)input_info.values[expr_id][i];
+            }
+            values_host_ptr = values_temp.data();
+        }
+
+        size_t base = all_tokens.size();
+        for (int i = 0; i < expr_tokens; ++i) {
+            all_tokens.push_back(tokens_host_ptr[i]);
+            all_values.push_back(values_host_ptr[i]);
+        }
+
+        ExprDesc ed;
+        ed.tokens = all_tokens.data() + base;
+        ed.values = all_values.data() + base;
+        ed.len    = expr_tokens;
+        exprs.push_back(ed);
+    }
+
+    if (exprs.empty()) {
+        return;
+    }
+
+    const float* X_src = nullptr;
+    std::vector<float> X_host;
+    if (input_info.X_packed_f32 && input_info.X_packed_f32[0]) {
+        X_src = input_info.X_packed_f32[0];
+    } else {
+        X_host.resize((size_t)num_dps * (size_t)num_features);
+        for (int dp = 0; dp < num_dps; ++dp) {
+            for (int v = 0; v < num_features; ++v) {
+                X_host[(size_t)dp * (size_t)num_features + v] =
+                    (float)all_vars[0][v][dp];
+            }
+        }
+        X_src = X_host.data();
+    }
+
+    float *d_X   = nullptr;
+    float *d_out = nullptr;
+
+    TimePoint t_alloc = measure_clock();
+    CUDA_CHECK(cudaMalloc(&d_X,   (size_t)num_dps * (size_t)num_features * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_out, (size_t)num_exprs * (size_t)num_dps * sizeof(float)));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    alloc_ms += clock_to_ms(t_alloc, measure_clock());
+
+    TimePoint t_h2d = measure_clock();
+    CUDA_CHECK(cudaMemcpy(d_X,
+                          X_src,
+                          (size_t)num_dps * (size_t)num_features * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    memcpy_h2d_ms_total += clock_to_ms(t_h2d, measure_clock());
+
+    double compile_ms = 0.0;
+    double jit_ms     = 0.0;
+    double launch_ms  = eval_multi_expr_straightline_gpu_nvrtc(
+        exprs,
+        d_X,
+        num_features,
+        num_dps,
+        d_out,
+        &compile_ms,
+        &jit_ms);
+
+    (void)launch_ms;
+
+    std::vector<float> out_host((size_t)num_exprs * (size_t)num_dps);
+    TimePoint t_d2h = measure_clock();
+    CUDA_CHECK(cudaMemcpy(out_host.data(),
+                          d_out,
+                          (size_t)num_exprs * (size_t)num_dps * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    memcpy_d2h_ms_total += clock_to_ms(t_d2h, measure_clock());
+
+    for (int expr_id = 0; expr_id < num_exprs; ++expr_id) {
+        for (int dp = 0; dp < num_dps; ++dp) {
+            size_t idx = (size_t)expr_id * (size_t)num_dps + (size_t)dp;
+            all_predictions[expr_id][dp] = (double)out_host[idx];
+        }
+    }
+
+    CUDA_CHECK(cudaFree(d_X));
+    CUDA_CHECK(cudaFree(d_out));
+
+    std::cout << "[NVRTC] Alloc time (host wall): " << alloc_ms << " ms" << std::endl;
+    std::cout << "[NVRTC] Total H2D memcpy time (host wall): " << memcpy_h2d_ms_total << " ms" << std::endl;
+    std::cout << "[NVRTC] Total D2H memcpy time (host wall): " << memcpy_d2h_ms_total << " ms" << std::endl;
+}
+
+// have small ptx kernels per expression or couple 
+// create in parallel 
+// compile to sass in parallel 
+// 1 subtree, token len 1024  (PTX->SASS JIT=4.54396 ms)
+// 1 subtree token len 60 (PTX->SASS JIT=3.55 ms)
+// 100 subtree token len 60 (PTX->SASS JIT==9.16142 m ms)
+
+// one threadblock evaluates some expressions over entire datapoint set 
+
+// similarly one ptx kernel evaluates some expressions over entire datapoint set 

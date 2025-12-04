@@ -198,6 +198,40 @@ run_gpu_evolve_simple_sample: $(GPU_EVOLVE_SIMPLE_BIN)
 run_gpu_evolve_simple: run_gpu_evolve_simple_sample
 
 # ============================================================================
+# GPU Jinha Multi-Expression Batch Evaluation (uses batch kernel)
+# ============================================================================
+GPU_JINHA_BATCH_BIN = $(BUILD_DIR)/gpu_jinha_batch_eval
+GPU_JINHA_BATCH_SRC = src/eval/gpu_simple_jinha.cu
+
+$(GPU_JINHA_BATCH_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_JINHA_BATCH_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA_MULTI_EXPRESSION_BATCH -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_BATCH_SRC) $(UTILS_CU_SRC)
+
+# Test with single expression (batch kernel)
+run_gpu_jinha_batch_single: $(GPU_JINHA_BATCH_BIN)
+	$(GPU_JINHA_BATCH_BIN) data/ai_feyn/singles/input_001.txt
+
+# Test with multiple expressions (batch kernel)
+run_gpu_jinha_batch_multi: $(GPU_JINHA_BATCH_BIN)
+	$(GPU_JINHA_BATCH_BIN) data/ai_feyn/multi/input_100_100k.txt
+
+# Test with sample input (batch kernel)
+run_gpu_jinha_batch_sample: $(GPU_JINHA_BATCH_BIN)
+	$(GPU_JINHA_BATCH_BIN) data/examples/sample_input.txt
+
+# Test with mutation file (batch kernel)
+run_gpu_jinha_batch_mutations: $(GPU_JINHA_BATCH_BIN)
+	$(GPU_JINHA_BATCH_BIN) data/ai_feyn/mutations/input_base056_100mut_1000k.txt
+
+# Test with 100 mutations file (1M datapoints per expression - batch kernel)
+run_gpu_jinha_batch_100_mutations_1000k: $(GPU_JINHA_BATCH_BIN)
+	$(GPU_JINHA_BATCH_BIN) data/ai_feyn/mutations/input_base056_100mut_1000k.txt
+
+# Default GPU Jinha Batch run target
+run_gpu_jinha_batch: run_gpu_jinha_batch_sample
+
+# ============================================================================
 # GPU Jinha Evaluation (using eval_tree.cu library)
 # ============================================================================
 GPU_JINHA_BIN = $(BUILD_DIR)/gpu_jinha_eval
@@ -224,6 +258,10 @@ run_gpu_jinha_eval_sample: $(GPU_JINHA_BIN)
 # Test with mutation file (100 mutations, shared data)
 run_gpu_jinha_eval_mutations: $(GPU_JINHA_BIN)
 	$(GPU_JINHA_BIN) data/ai_feyn/mutations/input_base056_100mut_1000k.txt
+
+# Test with 100 mutations file (1M datapoints per expression - multi-expression per kernel)
+run_gpu_jinha_eval_100_mutations_1000k_batch_expressions: $(GPU_JINHA_BATCH_BIN)
+	$(GPU_JINHA_BATCH_BIN) data/ai_feyn/mutations/input_base056_100mut_1000k.txt
 
 # Default GPU Jinha run target
 run_gpu_jinha_eval: run_gpu_jinha_eval_sample
@@ -258,7 +296,7 @@ run_gpu_evolve_jinha_eval_single: $(GPU_EVOLVE_JINHA_BIN)
 
 # Test with multiple expressions
 run_gpu_evolve_jinha_eval_multi: $(GPU_EVOLVE_JINHA_BIN)
-	$(GPU_EVOLVE_JINHA_BIN) data/ai_feyn/multi/input_100_100k.txt
+	$(GPU_EVOLVE_JINHA_BIN) data/ai_feyn/multi/input_100_1000k.txt
 
 # Test with sample input (2 expressions, 1000 data points each)
 run_gpu_evolve_jinha_eval_sample: $(GPU_EVOLVE_JINHA_BIN)
@@ -266,6 +304,35 @@ run_gpu_evolve_jinha_eval_sample: $(GPU_EVOLVE_JINHA_BIN)
 
 # Default GPU Evolve Jinha run target
 run_gpu_evolve_jinha_eval: run_gpu_evolve_jinha_eval_sample
+
+# Test with 100k mutations file (evolve version)
+run_gpu_evolve_jinha_eval_100k_mutations: $(GPU_EVOLVE_JINHA_BIN)
+	$(GPU_EVOLVE_JINHA_BIN) data/ai_feyn/mutations/input_base056_100kmut_1000k.txt
+
+# ============================================================================
+# GPU Evolve Jinha Multi-Expressions Batch Single Kernel Evaluation (uses multi-expression batch evolve)
+# ============================================================================
+GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN = $(BUILD_DIR)/gpu_evolve_jinha_batch_multi_expressions_single_kernel_eval
+
+$(GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_EVOLVE_JINHA_SRC) $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_EVOLVE_JINHA_MULTI_EXPRS -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_EVOLVE_JINHA_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC)
+
+# Test with single expression (multi-expressions batch single kernel)
+run_gpu_evolve_jinha_batch_multi_expressions_single_kernel_single: $(GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN)
+	$(GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN) data/ai_feyn/singles/input_001.txt
+
+# Test with multiple expressions (multi-expressions batch single kernel)
+run_gpu_evolve_jinha_batch_multi_expressions_single_kernel_multi: $(GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN)
+	$(GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN) data/ai_feyn/multi/input_100_1000k.txt
+
+# Test with sample input (2 expressions, 1000 data points each, multi-expressions batch single kernel)
+run_gpu_evolve_jinha_batch_multi_expressions_single_kernel_sample: $(GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN)
+	$(GPU_EVOLVE_JINHA_BATCH_MULTI_EXPRS_SINGLE_KERNEL_BIN) data/examples/sample_input.txt
+
+# Default GPU Evolve Jinha batch multi-expressions single kernel run target
+run_gpu_evolve_jinha_batch_multi_expressions_single_kernel: run_gpu_evolve_jinha_batch_multi_expressions_single_kernel_sample
 
 # =========================================================================
 # GPU Custom-Kernel-Per-Expression Evolve (uses gpu_custom_kernel_per_expression.cu)
@@ -285,7 +352,7 @@ run_gpu_custom_kernel_perexpression_evolve_single: $(GPU_CUSTOM_PEREXPR_BIN)
 
 # Test with multiple expressions (evolve)
 run_gpu_custom_kernel_perexpression_evolve_multi: $(GPU_CUSTOM_PEREXPR_BIN)
-	$(GPU_CUSTOM_PEREXPR_BIN) data/ai_feyn/multi/input_100_100k.txt
+	$(GPU_CUSTOM_PEREXPR_BIN) data/ai_feyn/multi/input_100_1000k.txt
 
 # Test with sample input (2 expressions, 1000 data points each, evolve)
 run_gpu_custom_kernel_perexpression_evolve_sample: $(GPU_CUSTOM_PEREXPR_BIN)
@@ -302,6 +369,14 @@ GPU_CUSTOM_PEREXPR_MULTI_BIN = $(BUILD_DIR)/gpu_custom_kernel_perexpression_mult
 $(GPU_CUSTOM_PEREXPR_MULTI_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_CUSTOM_PEREXPR_MULTI -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC) \
+		-lnvrtc -lcuda
+
+GPU_CUSTOM_PEREXPR_MULTI_NVRTC_BIN = $(BUILD_DIR)/gpu_custom_kernel_perexpression_multi_nvrtc
+
+$(GPU_CUSTOM_PEREXPR_MULTI_NVRTC_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(EVOLVE_KERNEL_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_CUSTOM_PEREXPR_MULTI_NVRTC -o $@ \
 		$(MAIN_SRC) $(UTILS_SRC) $(GPU_CUSTOM_PEREXPR_SRC) $(UTILS_CU_SRC) $(EVOLVE_KERNEL_SRC) \
 		-lnvrtc -lcuda
 

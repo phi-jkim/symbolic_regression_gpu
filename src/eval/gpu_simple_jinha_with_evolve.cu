@@ -19,6 +19,28 @@ extern "C" void eval_tree_gpu_batch(
     int threads,
     float* s_val);
 
+// Helper: Flatten 2D host array to 1D for GPU transfer (from gpu_simple_jinha.cu)
+float* flatten_vars_jinha(double **vars, int num_vars, int num_dps)
+{
+    float *flat = new float[(num_vars + 1) * num_dps];
+    
+    for (int i = 0; i <= num_vars; i++)
+    {
+        for (int dp = 0; dp < num_dps; dp++)
+        {
+            flat[i * num_dps + dp] = (float)vars[i][dp];
+        }
+    }
+    
+    return flat;
+}
+
+// Import the kernel launch wrapper from utils.cu
+extern "C" void launch_eval_prefix_kernel_multi_expression_batch(
+    int *d_tokens_batch, float *d_values_batch, int *d_token_offsets, int *d_num_tokens,
+    float *d_vars_flat, float *d_pred_batch, int num_vars, int num_dps, int num_exprs, int exprs_per_block,
+    int blocks_x, int blocks_y, int threads_per_block);
+
 #ifndef MAX_EVAL_STACK
 #define MAX_EVAL_STACK 60
 #endif
@@ -410,8 +432,8 @@ void evolve(InputInfo &input_info,
             }
 
             // Debug: human-readable symbolic formula (infix) using existing helper
-            // std::string formula = format_formula(h_tokens.data(), h_values_d.data(), len);
-            // fprintf(stderr, "[evolve] gen=%d ind=%d len=%d formula=%s\n", gen, i, len, formula.c_str());
+            std::string formula = format_formula(h_tokens.data(), h_values_d.data(), len);
+            fprintf(stderr, "[evolve] gen=%d ind=%d len=%d formula=%s\n", gen, i, len, formula.c_str());
 
             CUDA_CHECK(cudaMemcpy(d_tokens, h_tokens.data(), len * sizeof(int), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_values, h_values.data(), len * sizeof(float), cudaMemcpyHostToDevice));
@@ -551,11 +573,14 @@ void evolve(InputInfo &input_info,
 // Evolution-based batch entry point used when building with USE_GPU_EVOLVE_JINHA.
 // It mirrors the eval_jinha_batch signature so it can be selected via eval_batch
 // in evaluator.h and called from evaluate_and_save_results.
-void eval_evolve_jinha_batch(InputInfo &input_info, double ***all_vars, double **all_predictions)
+void eval_evolve_jinha_batch(InputInfo &input_info,
+                             double ***all_vars,
+                             double **all_predictions,
+                             EvalMetrics* metrics)
 {
     // Simple, fixed evolution configuration for now. These can be exposed later.
-    const int pop_size = 256;
-    const int num_generations = 5;
+    const int pop_size = 100;
+    const int num_generations = 1;
     // const int maxGPLen = 1024; // configurable GP maximum length (independent of input_info.max_tokens)
     const int maxGPLen = 60; 
     const unsigned int constSamplesLen = 8;
@@ -578,11 +603,10 @@ void eval_evolve_jinha_batch(InputInfo &input_info, double ***all_vars, double *
     std::vector<float> batch_kernel_times;
     batch_kernel_times.reserve((size_t)input_info.num_exprs * (size_t)pop_size * (size_t)num_generations);
 
-    for (int expr_idx = 0; expr_idx < input_info.num_exprs; ++expr_idx) {
-        evolve(input_info,
+    evolve(input_info,
                all_vars,
                all_predictions,
-               expr_idx,
+               0, // fixed expression idx
                pop_size,
                num_generations,
                maxGPLen,
@@ -594,36 +618,439 @@ void eval_evolve_jinha_batch(InputInfo &input_info, double ***all_vars, double *
                h_roulette.data(),
                h_consts,
                &batch_kernel_times);
+
+}
+
+
+void evolve_multi_expressions_batch(InputInfo &input_info,
+                                    double ***all_vars,
+                                    double ** /*all_predictions*/,
+                                    int expr_idx,
+                                    int pop_size,
+                                    int num_generations,
+                                    int maxGPLen,
+                                    unsigned int constSamplesLen,
+                                    float outProb,
+                                    float constProb,
+                                    const unsigned int* h_keys,
+                                    const float* h_depth2leaf,
+                                    const float* h_roulette,
+                                    const float* h_consts,
+                                    std::vector<float>* kernel_times_accum, /* optional */
+                                    EvalMetrics* metrics)
+{
+    if (expr_idx < 0 || expr_idx >= input_info.num_exprs) {
+        fprintf(stderr,
+                "evolve_multi_expressions_batch: invalid expr_idx %d (num_exprs=%d)\n",
+                expr_idx, input_info.num_exprs);
+        return;
     }
 
-    if (!batch_kernel_times.empty()) {
-        float total_ms = 0.0f;
-        for (float v : batch_kernel_times) total_ms += v;
-        float first_ms = batch_kernel_times.front();
+    int num_vars = input_info.num_vars[expr_idx];
+    int num_dps  = input_info.num_dps[expr_idx];
 
-        std::vector<float> sorted_all = batch_kernel_times;
-        std::sort(sorted_all.begin(), sorted_all.end());
-        float  median_ms = 0.0f;
-        size_t n         = sorted_all.size();
-        if (n % 2 == 1)
-            median_ms = sorted_all[n / 2];
-        else
-            median_ms = 0.5f * (sorted_all[n / 2 - 1] + sorted_all[n / 2]);
+    if (num_vars <= 0 || num_dps <= 0 ||
+        maxGPLen <= 0 || pop_size <= 0 || num_generations <= 0)
+    {
+        fprintf(stderr,
+                "evolve_multi_expressions_batch: invalid parameters "
+                "(num_vars=%d, num_dps=%d, maxGPLen=%d, pop=%d, gens=%d)\n",
+                num_vars, num_dps, maxGPLen, pop_size, num_generations);
+        return;
+    }
 
-        float  mean_excl_first_ms = 0.0f;
-        size_t n_excl             = 0;
-        if (batch_kernel_times.size() > 1) {
-            for (size_t i = 1; i < batch_kernel_times.size(); ++i) {
-                mean_excl_first_ms += batch_kernel_times[i];
+    int varLen = num_vars;
+    printf("evolve_multi_expressions_batch: expr_idx=%d, num_vars=%d, num_dps=%d\n", expr_idx, num_vars, num_dps);
+    int outLen = 1;  // single-output SR
+
+    // ------------------------------------------------------------
+    // Build labels only (we'll use flatten_vars_jinha for X+Y for the kernel)
+    // ------------------------------------------------------------
+    std::vector<float> h_labels(num_dps);
+    for (int dp = 0; dp < num_dps; ++dp) {
+        // assume last column is output/label
+        h_labels[dp] = (float)all_vars[expr_idx][varLen][dp];
+    }
+
+    // ------------------------------------------------------------
+    // GP population on device
+    // ------------------------------------------------------------
+    float   *d_val  = nullptr;
+    int16_t *d_type = nullptr;
+    int16_t *d_size = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_val,  (size_t)pop_size * (size_t)maxGPLen * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_type, (size_t)pop_size * (size_t)maxGPLen * sizeof(int16_t)));
+    CUDA_CHECK(cudaMalloc(&d_size, (size_t)pop_size * (size_t)maxGPLen * sizeof(int16_t)));
+
+    unsigned int *d_keys       = nullptr;
+    float        *d_depth2leaf = nullptr;
+    float        *d_roulette   = nullptr;
+    float        *d_consts     = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&d_keys,       2 * sizeof(unsigned int)));
+    CUDA_CHECK(cudaMalloc(&d_depth2leaf, MAX_FULL_DEPTH * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_roulette,   Function::END * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_consts,     constSamplesLen * sizeof(float)));
+
+    CUDA_CHECK(cudaMemcpy(d_keys,       h_keys,          2 * sizeof(unsigned int),    cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_depth2leaf, h_depth2leaf,    MAX_FULL_DEPTH * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_roulette,   h_roulette,      Function::END * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_consts,     h_consts,        constSamplesLen * sizeof(float), cudaMemcpyHostToDevice));
+
+    // Generate initial population
+    generate((unsigned int)pop_size,
+             (unsigned int)maxGPLen,
+             (unsigned int)varLen,
+             (unsigned int)outLen,
+             constSamplesLen,
+             outProb,
+             constProb,
+             d_keys,
+             d_depth2leaf,
+             d_roulette,
+             d_consts,
+             d_val,
+             d_type,
+             d_size);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // ------------------------------------------------------------
+    // Shared dataset for multi-expression kernel: flatten X+Y
+    // ------------------------------------------------------------
+    double **vars_expr = all_vars[expr_idx];
+    float  *h_vars_flat = flatten_vars_jinha(vars_expr, num_vars, num_dps);
+
+    float *d_vars_flat  = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_vars_flat,
+                          (size_t)(num_vars + 1) * (size_t)num_dps * sizeof(float)));
+
+    float total_h2d_ms    = 0.0f;
+    float total_d2h_ms    = 0.0f;
+    float total_kernel_ms = 0.0f;
+    int   num_kernel_launches = 0;
+
+    TimePoint t_h2d0 = measure_clock();
+    CUDA_CHECK(cudaMemcpy(d_vars_flat, h_vars_flat,
+                          (size_t)(num_vars + 1) * (size_t)num_dps * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    total_h2d_ms += clock_to_ms(t_h2d0, measure_clock());
+
+    // ------------------------------------------------------------
+    // Buffers for batched tokens/values for the multi-expression kernel
+    // We allocate at worst pop_size * maxGPLen capacity.
+    // ------------------------------------------------------------
+    int   *d_tokens_batch  = nullptr;
+    float *d_values_batch  = nullptr;
+    int   *d_token_offsets = nullptr;
+    int   *d_num_tokens    = nullptr;
+    float *d_pred_batch    = nullptr;
+
+    const size_t max_total_tokens = (size_t)pop_size * (size_t)maxGPLen;
+
+    CUDA_CHECK(cudaMalloc(&d_tokens_batch,  max_total_tokens * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_values_batch,  max_total_tokens * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_token_offsets, pop_size        * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_num_tokens,    pop_size        * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_pred_batch,    (size_t)pop_size * (size_t)num_dps * sizeof(float)));
+
+    std::vector<int>   h_token_offsets(pop_size);
+    std::vector<int>   h_num_tokens(pop_size);
+    std::vector<int>   h_tokens_batch(max_total_tokens);
+    std::vector<float> h_values_batch(max_total_tokens);
+
+    // Pinned host buffer for predictions
+    float *h_pred_batch = nullptr;
+    CUDA_CHECK(cudaHostAlloc(&h_pred_batch,
+                             (size_t)pop_size * (size_t)num_dps * sizeof(float),
+                             cudaHostAllocDefault));
+
+    // Host copies of population
+    std::vector<float>   h_pop_val((size_t)pop_size * (size_t)maxGPLen);
+    std::vector<int16_t> h_pop_type((size_t)pop_size * (size_t)maxGPLen);
+    std::vector<int16_t> h_pop_size((size_t)pop_size * (size_t)maxGPLen);
+
+    // For token conversion
+    std::vector<double> h_values_d(maxGPLen); // not strictly needed, kept for parity
+
+    float best_fitness = std::numeric_limits<float>::infinity();
+    int   best_idx     = -1;
+
+    // Kernel timing per generation
+    cudaEvent_t ev_start, ev_stop;
+    CUDA_CHECK(cudaEventCreate(&ev_start));
+    CUDA_CHECK(cudaEventCreate(&ev_stop));
+    std::vector<float> kernel_times_ms;
+    kernel_times_ms.reserve((size_t)num_generations);
+
+    // ------------------------------------------------------------
+    // Evolution loop – here we only re-evaluate a fixed population
+    // using the multi-expression kernel; no crossover/mutation yet.
+    // ------------------------------------------------------------
+    for (int gen = 0; gen < num_generations; ++gen) {
+        // Pull population description to host
+        CUDA_CHECK(cudaMemcpy(h_pop_val.data(),  d_val,
+                              h_pop_val.size()  * sizeof(float),
+                              cudaMemcpyHostToDevice == cudaMemcpyHostToDevice ? cudaMemcpyDeviceToHost : cudaMemcpyDeviceToHost)); // safety
+        CUDA_CHECK(cudaMemcpy(h_pop_type.data(), d_type,
+                              h_pop_type.size() * sizeof(int16_t),
+                              cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_pop_size.data(), d_size,
+                              h_pop_size.size() * sizeof(int16_t),
+                              cudaMemcpyDeviceToHost));
+
+        // ----------------------------------------------------------------
+        // Build batched tokens/values for ALL individuals in this generation
+        // ----------------------------------------------------------------
+        size_t total_tokens = 0;
+        for (int i = 0; i < pop_size; ++i) {
+            const int16_t *sub_i = &h_pop_size[(size_t)i * (size_t)maxGPLen];
+            int len = (int)sub_i[0];
+            if (len <= 0 || len > maxGPLen) {
+                h_token_offsets[i] = (int)total_tokens;
+                h_num_tokens[i]    = 0;
+                continue;
             }
-            n_excl = batch_kernel_times.size() - 1;
-            mean_excl_first_ms /= (float)n_excl;
+            h_token_offsets[i] = (int)total_tokens;
+            h_num_tokens[i]    = len;
+            total_tokens      += (size_t)len;
+        }
+        if (total_tokens > max_total_tokens) {
+            fprintf(stderr,
+                    "evolve_multi_expressions_batch: total_tokens=%zu exceeds capacity=%zu\n",
+                    (size_t)total_tokens, (size_t)max_total_tokens);
+            break;
+        }
+
+        // Fill packed token/value arrays
+        for (int i = 0; i < pop_size; ++i) {
+            const float   *val_i  = &h_pop_val[(size_t)i * (size_t)maxGPLen];
+            const int16_t *type_i = &h_pop_type[(size_t)i * (size_t)maxGPLen];
+            const int16_t *sub_i  = &h_pop_size[(size_t)i * (size_t)maxGPLen];
+
+            int len = (int)sub_i[0];
+            if (len <= 0 || len > maxGPLen) continue;
+
+            int offset = h_token_offsets[i];
+
+            for (int t = 0; t < len; ++t) {
+                int16_t node_type = (int16_t)(type_i[t] & NodeType::TYPE_MASK);
+                float   node_val  = val_i[t];
+
+                int tok;
+                float fval = 0.0f;
+                if (node_type == NodeType::CONST) {
+                    tok  = TOK_CONST;
+                    fval = node_val;
+                } else if (node_type == NodeType::VAR) {
+                    tok  = TOK_VAR;
+                    fval = node_val;
+                } else {
+                    tok  = static_cast<int>(node_val); // opcode
+                    fval = 0.0f;
+                }
+
+                h_tokens_batch[(size_t)offset + (size_t)t] = tok;
+                h_values_batch[(size_t)offset + (size_t)t] = fval;
+                h_values_d[t] = static_cast<double>(fval); // for potential debugging
+            }
+            
+            // Print formula for this individual
+            // std::string formula = format_formula(h_tokens_batch.data() + offset, h_values_d.data(), len);
+            // fprintf(stderr, "[evolve_multi] gen=%d ind=%d len=%d formula=%s\n", gen, i, len, formula.c_str());
+        }
+
+        // ----------------------------------------------------------------
+        // Copy batched tokens/values + metadata to device
+        // ----------------------------------------------------------------
+        TimePoint t_h2d = measure_clock();
+        if (total_tokens > 0) {
+            CUDA_CHECK(cudaMemcpy(d_tokens_batch, h_tokens_batch.data(),
+                                  total_tokens * sizeof(int),
+                                  cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_values_batch, h_values_batch.data(),
+                                  total_tokens * sizeof(float),
+                                  cudaMemcpyHostToDevice));
+        }
+        CUDA_CHECK(cudaMemcpy(d_token_offsets, h_token_offsets.data(),
+                              pop_size * sizeof(int),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_num_tokens,    h_num_tokens.data(),
+                              pop_size * sizeof(int),
+                              cudaMemcpyHostToDevice));
+        total_h2d_ms += clock_to_ms(t_h2d, measure_clock());
+
+        // ----------------------------------------------------------------
+        // Launch multi-expression kernel: pop_size "expressions", shared data
+        // ----------------------------------------------------------------
+        int threads_per_block = 128;
+        int exprs_per_block   = 4;
+        int blocks_x = (pop_size + exprs_per_block - 1) / exprs_per_block;
+        int blocks_y = (num_dps  + threads_per_block - 1) / threads_per_block;
+
+        CUDA_CHECK(cudaEventRecord(ev_start));
+        launch_eval_prefix_kernel_multi_expression_batch(
+            d_tokens_batch, d_values_batch, d_token_offsets, d_num_tokens,
+            d_vars_flat, d_pred_batch, num_vars, num_dps,
+            pop_size, exprs_per_block, blocks_x, blocks_y, threads_per_block);
+        CUDA_CHECK(cudaEventRecord(ev_stop));
+        CUDA_CHECK(cudaEventSynchronize(ev_stop));
+
+        float kernel_ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&kernel_ms, ev_start, ev_stop));
+        total_kernel_ms += kernel_ms;
+        kernel_times_ms.push_back(kernel_ms);
+        ++num_kernel_launches;
+
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        // ----------------------------------------------------------------
+        // Copy predictions back and compute MSE for each individual
+        // ----------------------------------------------------------------
+        TimePoint t_d2h = measure_clock();
+        CUDA_CHECK(cudaMemcpy(h_pred_batch, d_pred_batch,
+                              (size_t)pop_size * (size_t)num_dps * sizeof(float),
+                              cudaMemcpyDeviceToHost));
+        total_d2h_ms += clock_to_ms(t_d2h, measure_clock());
+
+        for (int i = 0; i < pop_size; ++i) {
+            double mse = 0.0;
+            const float *pred_i = &h_pred_batch[(size_t)i * (size_t)num_dps];
+            for (int dp = 0; dp < num_dps; ++dp) {
+                double diff = (double)pred_i[dp] - (double)h_labels[dp];
+                mse += diff * diff;
+            }
+            mse /= (double)num_dps;
+
+            if ((float)mse < best_fitness) {
+                best_fitness = (float)mse;
+                best_idx     = i;
+            }
         }
 
         fprintf(stderr,
-                "[evolve_batch] kernel time (launch+sync): total=%g ms, first=%g ms, median_all=%g ms, "
-                "mean_excl_first=%g ms over %zu evals (%zu excl first)\n",
-                (double)total_ms, (double)first_ms, (double)median_ms,
-                (double)mean_excl_first_ms, n, n_excl);
+                "[evolve_multi_expressions_batch] generation %d best MSE=%g (idx=%d), kernel=%g ms\n",
+                gen, best_fitness, best_idx, kernel_ms);
+        
+        // Print the best formula from this generation
+        if (best_idx >= 0) {
+            const int16_t *sub_i = &h_pop_size[(size_t)best_idx * (size_t)maxGPLen];
+            int best_len = (int)sub_i[0];
+            if (best_len > 0 && best_len <= maxGPLen) {
+                int best_offset = h_token_offsets[best_idx];
+                
+                // Extract values for the best individual
+                std::vector<double> best_values(best_len);
+                for (int t = 0; t < best_len; ++t) {
+                    best_values[t] = static_cast<double>(h_values_batch[(size_t)best_offset + (size_t)t]);
+                }
+                
+                std::string best_formula = format_formula(h_tokens_batch.data() + best_offset, best_values.data(), best_len);
+                fprintf(stderr, "[evolve_multi] BEST gen=%d formula=%s\n", gen, best_formula.c_str());
+            }
+        }
     }
+
+    // ------------------------------------------------------------
+    // Export kernel times if requested
+    // ------------------------------------------------------------
+    if (kernel_times_accum && !kernel_times_ms.empty()) {
+        kernel_times_accum->insert(kernel_times_accum->end(),
+                                   kernel_times_ms.begin(),
+                                   kernel_times_ms.end());
+    }
+
+    // ------------------------------------------------------------
+    // Fill metrics if provided
+    // ------------------------------------------------------------
+    if (metrics != nullptr) {
+        metrics->h2d_transfer_ms  = total_h2d_ms;
+        metrics->kernel_exec_ms   = total_kernel_ms;
+        metrics->d2h_transfer_ms  = total_d2h_ms;
+        metrics->total_gpu_ms     = total_h2d_ms + total_kernel_ms + total_d2h_ms;
+        metrics->num_kernel_launches = num_kernel_launches;
+    }
+
+    fprintf(stderr,
+            "[evolve_multi_expressions_batch] summary: H2D=%g ms, kernel=%g ms, D2H=%g ms, launches=%d\n",
+            (double)total_h2d_ms, (double)total_kernel_ms,
+            (double)total_d2h_ms, num_kernel_launches);
+
+    // ------------------------------------------------------------
+    // Cleanup
+    // ------------------------------------------------------------
+    CUDA_CHECK(cudaEventDestroy(ev_start));
+    CUDA_CHECK(cudaEventDestroy(ev_stop));
+
+    CUDA_CHECK(cudaFree(d_tokens_batch));
+    CUDA_CHECK(cudaFree(d_values_batch));
+    CUDA_CHECK(cudaFree(d_token_offsets));
+    CUDA_CHECK(cudaFree(d_num_tokens));
+    CUDA_CHECK(cudaFree(d_pred_batch));
+    CUDA_CHECK(cudaFree(d_vars_flat));
+    CUDA_CHECK(cudaFree(d_val));
+    CUDA_CHECK(cudaFree(d_type));
+    CUDA_CHECK(cudaFree(d_size));
+    CUDA_CHECK(cudaFree(d_keys));
+    CUDA_CHECK(cudaFree(d_depth2leaf));
+    CUDA_CHECK(cudaFree(d_roulette));
+    CUDA_CHECK(cudaFree(d_consts));
+
+    delete[] h_vars_flat;
+    CUDA_CHECK(cudaFreeHost(h_pred_batch));
 }
+
+void eval_evolve_jinha_multi_expressions_batch(InputInfo &input_info,
+                                               double ***all_vars,
+                                               double **all_predictions,
+                                               EvalMetrics* metrics)
+{
+    // Simple, fixed evolution configuration (same as eval_evolve_jinha_batch)
+    const int pop_size        = 100;
+    const int num_generations = 1;
+    const int maxGPLen        = 60;
+    const unsigned int constSamplesLen = 8;
+    const float outProb       = 0.0f;
+    const float constProb     = 0.01f;
+
+    // Host-side tables mirroring evolution_tests.cpp
+    unsigned int h_keys[2] = {42u, 1337u};
+
+    float h_depth[MAX_FULL_DEPTH];
+    for (int i = 0; i < MAX_FULL_DEPTH; ++i)
+        h_depth[i] = 0.0001f;
+
+    std::vector<float> h_roulette(Function::LOOSE_SQRT + 1);
+    h_roulette[0] = 0.0f;
+    for (int i = 1; i <= Function::LOOSE_SQRT; ++i)
+        h_roulette[i] = static_cast<float>(i) /
+                        static_cast<float>(Function::LOOSE_SQRT);
+        // h_roulette[i] = 1.0f; 
+
+    float h_consts[constSamplesLen] =
+        {-1.f, -0.5f, 0.f, 0.5f, 1.f, 2.f, 3.f, 4.f};
+
+    // Accumulate kernel timings across generations (optional)
+    std::vector<float> batch_kernel_times;
+    batch_kernel_times.reserve((size_t)pop_size * (size_t)num_generations);
+
+    // For now, evolve on expression 0's dataset, but evaluate pop_size
+    // candidate expressions in parallel using the multi-expression kernel.
+    evolve_multi_expressions_batch(input_info,
+                                   all_vars,
+                                   all_predictions,
+                                   /*expr_idx=*/0,
+                                   pop_size,
+                                   num_generations,
+                                   maxGPLen,
+                                   constSamplesLen,
+                                   outProb,
+                                   constProb,
+                                   h_keys,
+                                   h_depth,
+                                   h_roulette.data(),
+                                   h_consts,
+                                   &batch_kernel_times,
+                                   metrics);
+}
+

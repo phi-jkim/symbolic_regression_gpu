@@ -409,10 +409,10 @@ __global__ void eval_prefix_kernel_batch(const int* __restrict__ tokens,
     int   tc = 0;
 
     // RegCache6 cache;
-    RegCache3 cache;
+    // RegCache3 cache;
 
     const float* x = X + (size_t)idx * (size_t)num_features;
-    float r;
+    // float r;
 
     // for (int i = len - 1; i >= 0; --i) {
     //     const int t = tokens[i];
@@ -1233,4 +1233,141 @@ extern "C" void eval_tree_gpu_async(
                 "eval_tree_gpu_async launch error: %s (blocks=%d, threads=%d, shmem=%d)\n",
                 cudaGetErrorString(err), blocks, THREADS_CT, shmem_bytes);
     }
+}
+
+// ---- Multi-expression batch evaluator (GPU) ----
+
+// __device__ inline float eval_tree_device(const int* tokens,
+//                                          const float* values,
+//                                          const float* x,
+//                                          int len,
+//                                          int num_features)
+// {
+//     float stk[MAX_EVAL_STACK];
+//     int   sp = 0;
+
+//     for (int i = len - 1; i >= 0; --i) {
+//         int tok = tokens[i];
+//         if (tok > 0) { // operator
+//             int arity = op_arity(tok);
+//             if (arity == 1) {
+//                 float a = static_stack_pop(stk, sp);
+//                 float r = apply_op(tok, a, 0.0f);
+//                 static_stack_push(stk, r, sp);
+//             } else if (arity == 2) {
+//                 float a = static_stack_pop(stk, sp);
+//                 float b = static_stack_pop(stk, sp);
+//                 float r = apply_op(tok, a, b);
+//                 static_stack_push(stk, r, sp);
+//             } else {
+//                 // Ternary IF (kept for completeness if re-enabled)
+//                 float c = static_stack_pop(stk, sp);
+//                 float b = static_stack_pop(stk, sp);
+//                 float a = static_stack_pop(stk, sp);
+//                 float r = (a > 0.0f) ? b : c;
+//                 static_stack_push(stk, r, sp);
+//             }
+//         } else if (tok == 0) { // constant
+//             static_stack_push(stk, values[i], sp);
+//         } else if (tok == -1) { // variable
+//             int idx = (int)values[i];
+//             float v = (idx >= 0 && idx < num_features) ? x[idx] : 0.0f;
+//             static_stack_push(stk, v, sp);
+//         }
+//     }
+
+//     return (sp > 0) ? static_stack_pop(stk, sp) : 0.0f;
+// }
+
+__device__ inline float eval_tree_device(const int* tokens, const float* values, const float* x, int len, int num_features) {
+    float stk[MAX_EVAL_STACK];
+    int sp = 0;
+    int output = 0; 
+    int tok; 
+
+    
+    for (int i = len - 1; i >= 0; i--) {
+        tok = tokens[i];
+        if (tok > 0) { // operator
+            int arity = op_arity(tok);
+            if (arity == 2) {
+                float a = stk[--sp];
+                // --sp; 
+                // float a = 0.0; 
+                float b = stk[--sp];
+                // --sp; 
+                // float b = 0.0; 
+                stk[sp++] = apply_op(tok, a, b);
+                // sp++; 
+                // stk[sp++] = 0; 
+            } else { // unary
+                float a = stk[--sp];
+                // --sp; 
+                // float a = 0.0; 
+                stk[sp++] = apply_op(tok, a, 0.0f);
+                // sp++; 
+                // stk[sp++] = 0;
+                // sp++; 
+            }
+        } else if (tok == 0) { // constant
+            stk[sp++] = values[i];
+            // tok = values[i];
+            // sp++;
+        } else if (tok == -1) { // variable
+            stk[sp++] = x[(int)values[i]];
+            // tok = x[(int)values[i]];
+            // sp++;
+        }
+    }
+    return stk[--sp];
+    // return 0.0f; 
+    // return sp + tok; 
+}
+
+// GPU kernel: Each threadblock handles multiple expressions and subset of datapoints
+__global__ void eval_prefix_kernel_multi_expression_batch(
+    int *d_tokens_batch, float *d_values_batch, int *d_token_offsets, int *d_num_tokens,
+    float *d_vars_flat, float *d_pred_batch, int num_vars, int num_dps, int num_exprs, int exprs_per_block)
+{
+    int block_expr_start = blockIdx.x * exprs_per_block;
+    int block_expr_end = min(block_expr_start + exprs_per_block, num_exprs);
+    int dp_start = blockIdx.y * blockDim.x;
+    int dp_idx = dp_start + threadIdx.x; // which datapoint within this threadblock
+    
+    if (dp_idx >= num_dps) return;
+    
+    // Prepare input variables for this datapoint (shared by all expressions in this block)
+    float x[MAX_NUM_FEATURES];
+    #pragma unroll
+    for (int i = 0; i <= num_vars; i++) {
+        // vars_flat is laid out as [var0_dp0, var0_dp1, ..., var1_dp0, var1_dp1, ...]
+        x[i] = d_vars_flat[i * num_dps + dp_idx];
+    }
+    
+    // Process all expressions assigned to this threadblock
+    for (int expr_idx = block_expr_start; expr_idx < block_expr_end; expr_idx++) {
+        // Get tokens and values for this expression
+        int token_offset = d_token_offsets[expr_idx];
+        int *d_tokens = d_tokens_batch + token_offset;
+        float *d_values = d_values_batch + token_offset;
+        int num_tokens = d_num_tokens[expr_idx];
+        
+        // Get prediction pointer for this expression
+        float *d_pred = d_pred_batch + (expr_idx * num_dps);
+        
+        // Evaluate expression for this datapoint
+        d_pred[dp_idx] = eval_tree_device(d_tokens, d_values, x, num_tokens, num_vars);
+    }
+}
+
+// Host wrapper function to launch the kernel
+extern "C" void launch_eval_prefix_kernel_multi_expression_batch(
+    int *d_tokens_batch, float *d_values_batch, int *d_token_offsets, int *d_num_tokens,
+    float *d_vars_flat, float *d_pred_batch, int num_vars, int num_dps, int num_exprs, int exprs_per_block,
+    int blocks_x, int blocks_y, int threads_per_block)
+{
+    dim3 grid(blocks_x, blocks_y);
+    eval_prefix_kernel_multi_expression_batch<<<grid, threads_per_block>>>(
+        d_tokens_batch, d_values_batch, d_token_offsets, d_num_tokens,
+        d_vars_flat, d_pred_batch, num_vars, num_dps, num_exprs, exprs_per_block);
 }

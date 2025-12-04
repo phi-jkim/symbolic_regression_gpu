@@ -163,9 +163,9 @@ __device__ double eval_tree_gpu(int *tokens, double *values, double *x, int num_
     return stk[0];
 }
 
-// GPU kernel: Each thread evaluates one datapoint
+// GPU kernel: Each thread evaluates one datapoint for one expression
 __global__ void eval_kernel(int *d_tokens, double *d_values,
-                            double *d_vars_flat, double *d_pred,
+                            double *d_vars_flat, float *d_pred,
                             int num_tokens, int num_vars, int num_dps)
 {
     int dp_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -182,7 +182,7 @@ __global__ void eval_kernel(int *d_tokens, double *d_values,
         }
         
         // Evaluate expression for this datapoint
-        d_pred[dp_idx] = eval_tree_gpu(d_tokens, d_values, x, num_tokens, num_vars);
+        d_pred[dp_idx] = (float)eval_tree_gpu(d_tokens, d_values, x, num_tokens, num_vars);
     }
 }
 
@@ -279,11 +279,12 @@ void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_pred
         
         // Allocate GPU memory for tokens, values, and predictions
         int *d_tokens;
-        double *d_values, *d_pred;
+        double *d_values;
+        float *d_pred;
         
         CUDA_CHECK(cudaMalloc(&d_tokens, num_tokens * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_values, num_tokens * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_pred, num_dps * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_pred, num_dps * sizeof(float)));
         
         // Transfer tokens and values (H2D)
         GPUTimer h2d_timer;
@@ -333,12 +334,18 @@ void eval_gpu_batch(InputInfo &input_info, double ***all_vars, double **all_pred
         // Check for kernel errors
         CUDA_CHECK(cudaGetLastError());
         
-        // Transfer results back (D2H)
+        // Transfer results back (D2H) - use float for efficiency
         GPUTimer d2h_timer;
         d2h_timer.start();
-        CUDA_CHECK(cudaMemcpy(pred, d_pred, num_dps * sizeof(double), cudaMemcpyDeviceToHost));
+        std::vector<float> pred_float(num_dps);
+        CUDA_CHECK(cudaMemcpy(pred_float.data(), d_pred, num_dps * sizeof(float), cudaMemcpyDeviceToHost));
         float d2h_time = d2h_timer.stop();
         total_d2h_time += d2h_time;
+        
+        // Convert float to double
+        for (int dp = 0; dp < num_dps; dp++) {
+            pred[dp] = (double)pred_float[dp];
+        }
         
         // Free GPU memory (tokens, values, pred always; data only if not shared)
         CUDA_CHECK(cudaFree(d_tokens));
