@@ -498,6 +498,18 @@ $(GPU_SUBTREE_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_SUBTREE_SRC) $(E
 gpu_subtree_eval: $(GPU_SUBTREE_BIN)
 
 # ============================================================================
+# GPU Subtree Evaluator (Stateful, No Batching Across Datapoints)
+# ============================================================================
+GPU_SUBTREE_STATE_BIN = $(BUILD_DIR)/gpu_subtree_state_eval
+GPU_SUBTREE_STATE_SRC = src/eval/gpu_subtree_batch_state.cu src/eval/gpu_subtree_batch_state_main.cpp
+
+$(GPU_SUBTREE_STATE_BIN): $(GPU_SUBTREE_STATE_SRC) $(UTILS_SRC) $(UTILS_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -o $@ $(GPU_SUBTREE_STATE_SRC) $(UTILS_SRC)
+
+gpu_subtree_state_eval: $(GPU_SUBTREE_STATE_BIN)
+
+# ============================================================================
 # Data Generation
 # ============================================================================
 
@@ -607,6 +619,11 @@ bench_long_gpu: gpu_subtree_eval
 	@echo ">> GPU Subtree"
 	./build/gpu_subtree_eval -evolution 0 19 data/evolution_long_large
 
+bench_long_gpu_state: gpu_subtree_state_eval
+	@echo "--- Running Long & Large Benchmark (20 gens, 500k dps) on GPU (Stateful, no DP batching) ---"
+	@echo ">> GPU Subtree (Stateful)"
+	./build/gpu_subtree_state_eval 0 19 data/evolution_long_large
+
 bench_short: cpu_common cpu_multi_eval
 	@echo "--- Running Short & Small Benchmark (5 gens, 100k dps) ---"
 	@echo ">> Stateful Subtree"
@@ -618,6 +635,11 @@ bench_short_gpu: gpu_subtree_eval
 	@echo "--- Running Short & Small Benchmark (5 gens, 100k dps) on GPU ---"
 	@echo ">> GPU Subtree"
 	./build/gpu_subtree_eval -evolution 0 4 data/evolution_short_small
+
+bench_short_gpu_state: gpu_subtree_state_eval
+	@echo "--- Running Short & Small Benchmark (5 gens, 100k dps) on GPU (Stateful, no DP batching) ---"
+	@echo ">> GPU Subtree (Stateful)"
+	./build/gpu_subtree_state_eval 0 4 data/evolution_short_small
 
 # ============================================================================
 # GPU Jinha Evolution Benchmark
@@ -631,6 +653,11 @@ $(GPU_JINHA_EVOLVE_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $
 		$(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_EVOLVE_SRC) $(UTILS_CU_SRC) src/eval/common_eval.cpp
 
 gpu_jinha_evolve: $(GPU_JINHA_EVOLVE_BIN)
+
+bench_short_gpu_jinha: $(GPU_JINHA_EVOLVE_BIN)
+	@echo "--- Running Short & Small Benchmark (5 gens, 100k dps) on GPU (Jinha) ---"
+	@echo ">> GPU Jinha (Multi-Expr Batch)"
+	./build/gpu_jinha_evolve -evolution 0 4 data/evolution_short_small
 
 bench_long_gpu_jinha: $(GPU_JINHA_EVOLVE_BIN)
 	@echo "--- Running Long & Large Benchmark (20 gens, 500k dps) on GPU (Jinha) ---"
