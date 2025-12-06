@@ -254,6 +254,83 @@ static uint64_t compute_subtree_hash_gpu(const int *tokens, const double *values
   return h;
 }
 
+// Local helpers to compute subtree size (prefix notation) on the host
+static int simple_op_arity_state(int token) {
+  if (token < 10) return 2;  // binary operators 1-9
+  return 1;                  // unary operators >= 10
+}
+
+static int compute_subtree_size_state(const int *tokens, int start_idx, int total_tokens) {
+  if (start_idx >= total_tokens) return 0;
+
+  int token = tokens[start_idx];
+  if (token <= 0) {
+    // Variable or constant
+    return 1;
+  }
+
+  int arity = simple_op_arity_state(token);
+  int size  = 1;  // count the operator itself
+  int pos   = start_idx + 1;
+
+  for (int i = 0; i < arity && pos < total_tokens; ++i) {
+    int child_size = compute_subtree_size_state(tokens, pos, total_tokens);
+    size += child_size;
+    pos  += child_size;
+  }
+  return size;
+}
+
+// Mark cached subtrees from persistent GPU state into expr_sub_hints.
+// Convention:
+//   hints[pos] >= 0 : root of cached subtree, value is CACHE SLOT ID
+//   hints[pos] == -2: inside cached subtree
+//   hints[pos] == -1: no cached subtree
+static void mark_cached_subtrees_from_state(
+    InputInfo &input_info,
+    GPUSubtreeStateContext &ctx,
+    SubtreeDetectionResult &result) {
+
+  int num_exprs = input_info.num_exprs;
+  const int min_size_state = 3;  // same as detect_common_subtrees default
+
+  for (int expr = 0; expr < num_exprs; ++expr) {
+    int    len   = input_info.num_tokens[expr];
+    int   *toks  = input_info.tokens[expr];
+    double *vals = input_info.values[expr];
+    int   *hints = result.expr_sub_hints[expr];
+
+    // Reset hints so we control all cached subtree marking here
+    for (int i = 0; i < len; ++i) hints[i] = -1;
+
+    for (int pos = 0; pos < len; ++pos) {
+      if (hints[pos] != -1) continue;  // already claimed by a larger subtree
+
+      int size = compute_subtree_size_state(toks, pos, len);
+      if (size < min_size_state) continue;
+
+      uint64_t h = compute_subtree_hash_gpu(toks + pos, vals + pos, size);
+      auto it    = ctx.hash_to_idx.find(h);
+      if (it == ctx.hash_to_idx.end()) continue;  // not in GPU cache
+
+      int slot = it->second;
+
+      // Check for overlap (defensive, though we already skip if hints[pos]!=-1)
+      bool overlap = false;
+      for (int k = 0; k < size; ++k) {
+        if (hints[pos + k] != -1) { overlap = true; break; }
+      }
+      if (overlap) continue;
+
+      // Mark root and body
+      hints[pos] = slot;      // cache-slot ID
+      for (int k = 1; k < size && pos + k < len; ++k) {
+        hints[pos + k] = -2;  // inside subtree
+      }
+    }
+  }
+}
+
 // =============================================================================
 // Core stateful GPU subtree evaluator (no dp batching)
 // =============================================================================
@@ -283,8 +360,6 @@ void eval_gpu_subtree_batch_state(
       3,
       2);
 
-  // detect any subtree in cache 
-
   // Step 2: Map detected subtrees to persistent cache slots
   std::vector<int> new_subtree_indices;
   std::vector<int> new_cache_slots;
@@ -309,6 +384,16 @@ void eval_gpu_subtree_batch_state(
       subtree_id_to_slot[i] = it->second;
     }
   }
+
+  printf("Max num features: %d\n", MAX_NUM_FEATURES);
+
+  std::cout << "[gpu_subtree_state] New subtrees this gen: "
+            << new_subtree_indices.size() << std::endl;
+
+  // Step 2b: Mark any subtree (including those from previous generations)
+  // whose hash is present in the persistent GPU cache. This populates
+  // expr_sub_hints with cache-slot IDs at subtree roots.
+  mark_cached_subtrees_from_state(input_info, ctx, result);
 
   // Step 3: Prepare subtree structures for NEW subtrees (tokens/values)
   int *d_sub_tokens = nullptr, *d_sub_offsets = nullptr, *d_sub_lengths = nullptr, *d_sub_slots = nullptr;
@@ -366,11 +451,17 @@ void eval_gpu_subtree_batch_state(
     int    *hints = result.expr_sub_hints[i];
 
     for (int k = 0; k < len; k++) {
-      int sub_id = hints[k];
-      if (sub_id >= 0 && subtree_id_to_slot[sub_id] != -1) {
+      int hint = hints[k];
+
+      if (hint >= 0) {
+        // hint is a cache-slot ID; compute subtree size on the fly
+        int sub_size = compute_subtree_size_state(toks, k, len);
         h_skel_tokens.push_back(OP_REF);
-        h_skel_values.push_back((float)subtree_id_to_slot[sub_id]);
-        k += result.num_sub_tokens[sub_id] - 1;
+        h_skel_values.push_back((float)hint); // cache slot stored as float
+        k += sub_size - 1; // skip over subtree body
+      } else if (hint == -2) {
+        // Inside a cached subtree; body is skipped by the root case above
+        continue;
       } else {
         h_skel_tokens.push_back(toks[k]);
         h_skel_values.push_back((float)vals[k]);
@@ -407,9 +498,10 @@ void eval_gpu_subtree_batch_state(
   int threads  = 128;
   int blocks_y = (total_dps + threads - 1) / threads;
 
-  // Use CUDA events to time combined kernel execution (subtrees + skeletons)
-  cudaEvent_t ev_start, ev_stop;
+  // Use CUDA events to time subtree kernel and skeleton kernel separately
+  cudaEvent_t ev_start, ev_mid, ev_stop;
   CUDA_CHECK(cudaEventCreate(&ev_start));
+  CUDA_CHECK(cudaEventCreate(&ev_mid));
   CUDA_CHECK(cudaEventCreate(&ev_stop));
   CUDA_CHECK(cudaEventRecord(ev_start));
 
@@ -429,6 +521,9 @@ void eval_gpu_subtree_batch_state(
         subtrees_per_block);
   }
 
+  // Mark end of subtree kernel region
+  CUDA_CHECK(cudaEventRecord(ev_mid));
+
   // 6b. Skeleton expressions
   {
     int exprs_per_block = 4;
@@ -447,11 +542,19 @@ void eval_gpu_subtree_batch_state(
 
   CUDA_CHECK(cudaEventRecord(ev_stop));
   CUDA_CHECK(cudaEventSynchronize(ev_stop));
-  float kernel_ms = 0.0f;
-  CUDA_CHECK(cudaEventElapsedTime(&kernel_ms, ev_start, ev_stop));
-  std::cout << "[gpu_subtree_state] Kernel Time: " << kernel_ms << " ms" << std::endl;
+
+  float subtree_ms = 0.0f;
+  float total_kernel_ms = 0.0f;
+  CUDA_CHECK(cudaEventElapsedTime(&subtree_ms, ev_start, ev_mid));
+  CUDA_CHECK(cudaEventElapsedTime(&total_kernel_ms, ev_start, ev_stop));
+  float skeleton_ms = total_kernel_ms - subtree_ms;
+
+  std::cout << "[gpu_subtree_state] Subtree Kernel: " << subtree_ms
+            << " ms, Skeleton Kernel: " << skeleton_ms
+            << " ms, Combined Kernel: " << total_kernel_ms << " ms" << std::endl;
 
   CUDA_CHECK(cudaEventDestroy(ev_start));
+  CUDA_CHECK(cudaEventDestroy(ev_mid));
   CUDA_CHECK(cudaEventDestroy(ev_stop));
 
   // Step 7: Copy predictions back and convert to double
@@ -462,9 +565,9 @@ void eval_gpu_subtree_batch_state(
                         cudaMemcpyDeviceToHost));
   d2h_ms = clock_to_ms(t_d2h, measure_clock());
 
-  double total_gpu_ms = h2d_ms + (double)kernel_ms + d2h_ms;
+  double total_gpu_ms = h2d_ms + (double)total_kernel_ms + d2h_ms;
   std::cout << "[gpu_subtree_state] H2D: " << h2d_ms
-            << " ms, Kernel: " << kernel_ms
+            << " ms, Kernel: " << total_kernel_ms
             << " ms, D2H: " << d2h_ms
             << " ms, Total GPU: " << total_gpu_ms << " ms" << std::endl;
 
