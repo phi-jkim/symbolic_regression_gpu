@@ -606,6 +606,26 @@ gen_data_long:
 gen_data_short:
 	python3 src/script/generate_evolution_data.py --gens 5 --dps 100000 --out data/evolution_short_small
 
+gen_data_test20:
+	python3 src/script/generate_evolution_test20.py --gens 20 --pop 1000 --dps 500000 --out data/evolution_test20
+
+bench_test20: cpu_common cpu_multi_eval
+	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) ---"
+	@echo ">> Stateful Subtree"
+	./build/cpu_common_subtree -evolution 0 19 data/evolution_test20
+	@echo ">> CPU Multi"
+	./build/cpu_multi_eval -evolution 0 19 data/evolution_test20
+
+bench_test20_gpu: gpu_subtree_eval
+	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU ---"
+	@echo ">> GPU Subtree"
+	./build/gpu_subtree_eval -evolution 0 19 data/evolution_test20
+
+bench_test20_gpu_state: gpu_subtree_state_eval
+	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Stateful) ---"
+	@echo ">> GPU Subtree (Stateful)"
+	./build/gpu_subtree_state_eval 0 19 data/evolution_test20
+
 # Run Benchmarks (Stateful vs Stateless Multi-threaded)
 bench_long: cpu_common cpu_multi_eval
 	@echo "--- Running Long & Large Benchmark (20 gens, 500k dps) ---"

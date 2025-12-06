@@ -1326,7 +1326,30 @@ int evaluate_evolution_benchmark(
         double dt = clock_to_ms(t0, measure_clock());
         total_time_ms += dt;
         
-        std::cout << "Gen " << gen << ": " << dt << " ms" << std::endl;
+        // Calculate MSE stats
+        double min_mse = 1e30;
+        double avg_mse = 0.0;
+        int valid_count = 0;
+        
+        for (int i = 0; i < input_info.num_exprs; i++) {
+            double sum_sq_err = 0.0;
+            int n = input_info.num_dps[i];
+            int v = input_info.num_vars[i]; // output variable index
+            
+            for (int j = 0; j < n; j++) {
+                double diff = all_predictions[i][j] - all_vars[i][v][j];
+                sum_sq_err += diff * diff;
+            }
+            double mse = sum_sq_err / n;
+            
+            if (mse < min_mse) min_mse = mse;
+            avg_mse += mse;
+            valid_count++;
+        }
+        
+        if (valid_count > 0) avg_mse /= valid_count;
+        
+        std::cout << "Gen " << gen << ": " << dt << " ms | Min MSE: " << min_mse << " | Avg MSE: " << avg_mse << std::endl;
         
         // Cleanup
         for (int i = 0; i < input_info.num_exprs; i++) delete[] all_predictions[i];
