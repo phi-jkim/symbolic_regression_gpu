@@ -484,6 +484,20 @@ compare_all_evals: $(CPU_EVAL_BIN) $(CPU_MULTI_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_J
 	@time $(GPU_ASYNC_JINHA_BIN) data/examples/sample_input.txt
 
 # ============================================================================
+# GPU Subtree Evaluator (Two-Stage with Persistent Cache)
+# ============================================================================
+GPU_SUBTREE_BIN = $(BUILD_DIR)/gpu_subtree_eval
+GPU_SUBTREE_SRC = src/eval/gpu_subtree.cu
+
+$(GPU_SUBTREE_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_SUBTREE_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_SUBTREE -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_SUBTREE_SRC) src/eval/common_eval.cpp
+
+# Default GPU Subtree run target
+gpu_subtree_eval: $(GPU_SUBTREE_BIN)
+
+# ============================================================================
 # Data Generation
 # ============================================================================
 
@@ -495,11 +509,16 @@ MUTATIONS_DIR := data/ai_feyn/mutations
 .PHONY: data_gen data_gen_multi data_gen_singles data_gen_mutations
 
 # Generate all data files
-data_gen: data_gen_multi data_gen_singles data_gen_mutations
+data_gen: data_gen_multi data_gen_singles data_gen_mutations data_gen_evo
 	@echo ""
 	@echo "=========================================="
 	@echo "All data generation complete!"
 	@echo "=========================================="
+
+# Generate evolution benchmark data
+data_gen_evo: gen_data_short gen_data_long
+	@echo ""
+	@echo "Evolution data generated."
 
 # Generate multi-expression files with different datapoint counts
 data_gen_multi:
@@ -578,17 +597,45 @@ gen_data_short:
 # Run Benchmarks (Stateful vs Stateless Multi-threaded)
 bench_long: cpu_common cpu_multi_eval
 	@echo "--- Running Long & Large Benchmark (20 gens, 500k dps) ---"
-	@echo ">> Stateful Subtree (1 thread)"
+	@echo ">> Stateful Subtree"
 	./build/cpu_common_subtree -evolution 0 19 data/evolution_long_large
-	@echo ">> CPU Multi (8 threads)"
+	@echo ">> CPU Multi"
 	./build/cpu_multi_eval -evolution 0 19 data/evolution_long_large
+
+bench_long_gpu: gpu_subtree_eval
+	@echo "--- Running Long & Large Benchmark (20 gens, 500k dps) on GPU ---"
+	@echo ">> GPU Subtree"
+	./build/gpu_subtree_eval -evolution 0 19 data/evolution_long_large
 
 bench_short: cpu_common cpu_multi_eval
 	@echo "--- Running Short & Small Benchmark (5 gens, 100k dps) ---"
-	@echo ">> Stateful Subtree (1 thread)"
+	@echo ">> Stateful Subtree"
 	./build/cpu_common_subtree -evolution 0 4 data/evolution_short_small
-	@echo ">> CPU Multi (8 threads)"
+	@echo ">> CPU Multi"
 	./build/cpu_multi_eval -evolution 0 4 data/evolution_short_small
+
+bench_short_gpu: gpu_subtree_eval
+	@echo "--- Running Short & Small Benchmark (5 gens, 100k dps) on GPU ---"
+	@echo ">> GPU Subtree"
+	./build/gpu_subtree_eval -evolution 0 4 data/evolution_short_small
+
+# ============================================================================
+# GPU Jinha Evolution Benchmark
+# ============================================================================
+GPU_JINHA_EVOLVE_BIN = $(BUILD_DIR)/gpu_jinha_evolve
+GPU_JINHA_EVOLVE_SRC = src/eval/gpu_simple_jinha.cu
+
+$(GPU_JINHA_EVOLVE_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_JINHA_EVOLVE_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA_MULTI_EXPRESSION_BATCH -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_EVOLVE_SRC) $(UTILS_CU_SRC) src/eval/common_eval.cpp
+
+gpu_jinha_evolve: $(GPU_JINHA_EVOLVE_BIN)
+
+bench_long_gpu_jinha: $(GPU_JINHA_EVOLVE_BIN)
+	@echo "--- Running Long & Large Benchmark (20 gens, 500k dps) on GPU (Jinha) ---"
+	@echo ">> GPU Jinha (Multi-Expr Batch)"
+	./build/gpu_jinha_evolve -evolution 0 19 data/evolution_long_large
 
 bench_all_evolution: gen_data_short gen_data_long bench_short bench_long
 run_test_detect: $(TEST_DETECT_BIN)

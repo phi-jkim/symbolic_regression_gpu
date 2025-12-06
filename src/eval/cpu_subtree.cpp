@@ -80,39 +80,7 @@ static inline double stack_pop()
     return stk[sp];
 }
 
-static double eval_tree_cpu_standard(int *tokens, double *values, double *x, int num_tokens)
-{
-    sp = 0;
-    double tmp, val1, val2 = 0.0;
-    for (int i = num_tokens - 1; i >= 0; i--)
-    {
-        int tok = tokens[i];
-        if (tok > 0) // operation
-        {
-            val1 = stack_pop();
-            if (tok < 10) // binary operation (1-9)
-                val2 = stack_pop();
-
-            tmp = eval_op(tok, val1, val2);
-            stack_push(tmp);
-        }
-        else if (tok == 0) // constant
-        {
-            stack_push(values[i]);
-        }
-        else if (tok == -1) // variable
-        {
-            stack_push(x[(int)values[i]]);
-        }
-    }
-    return stk[0];
-}
-
-// ============================================================================
-// Optimized CPU Evaluator with Subtree Reuse
-// ============================================================================
-
-static double eval_tree_cpu_optimized(
+static double eval_tree_cpu(
     int *tokens, double *values, int *hints, 
     double *x, double **cached_subtrees, int dp_idx,
     int num_tokens)
@@ -122,19 +90,23 @@ static double eval_tree_cpu_optimized(
     
     for (int i = num_tokens - 1; i >= 0; i--)
     {
-        int hint = hints[i];
-        
-        // Case 1: Inside a common subtree (SKIP)
-        if (hint == -2) 
+        // Check for subtree reuse if hints are available
+        if (hints != nullptr)
         {
-            continue;
-        }
-        
-        // Case 2: Root of a common subtree (REUSE)
-        if (hint >= 0)
-        {
-            stack_push(cached_subtrees[hint][dp_idx]);
-            continue;
+            int hint = hints[i];
+            
+            // Case 1: Inside a common subtree (SKIP)
+            if (hint == -2) 
+            {
+                continue;
+            }
+            
+            // Case 2: Root of a common subtree (REUSE)
+            if (hint >= 0)
+            {
+                stack_push(cached_subtrees[hint][dp_idx]);
+                continue;
+            }
         }
         
         // Case 3: Standard node (EVALUATE)
@@ -228,10 +200,13 @@ void eval_cpu_common_subtree_batch(InputInfo &input_info, double ***all_vars, do
                     for (int i = 0; i <= num_vars; i++) x[i] = vars[i][dp];
                     for (int sub_id = 0; sub_id < detect_res.num_subs; sub_id++)
                     {
-                        cached_results[sub_id][dp] = eval_tree_cpu_standard(
+                        cached_results[sub_id][dp] = eval_tree_cpu(
                             detect_res.sub_tokens[sub_id], 
                             detect_res.sub_values[sub_id], 
+                            nullptr,
                             x, 
+                            nullptr,
+                            0,
                             detect_res.num_sub_tokens[sub_id]);
                     }
                 }
@@ -253,7 +228,7 @@ void eval_cpu_common_subtree_batch(InputInfo &input_info, double ***all_vars, do
                 for (int dp = 0; dp < total_dps; dp++)
                 {
                     for (int i = 0; i <= num_vars; i++) x[i] = vars[i][dp];
-                    cached_results[sub_id][dp] = eval_tree_cpu_standard(sub_toks, sub_vals, x, sub_len);
+                    cached_results[sub_id][dp] = eval_tree_cpu(sub_toks, sub_vals, nullptr, x, nullptr, 0, sub_len);
                 }
             }
             delete[] x;
@@ -288,9 +263,9 @@ void eval_cpu_common_subtree_batch(InputInfo &input_info, double ***all_vars, do
                     for (int i = 0; i <= num_vars; i++) x[i] = vars[i][dp];
                     
                     if (detect_res.num_subs > 0)
-                        pred[dp] = eval_tree_cpu_optimized(tokens, values, hints, x, cached_results, dp, num_tokens);
+                        pred[dp] = eval_tree_cpu(tokens, values, hints, x, cached_results, dp, num_tokens);
                     else
-                        pred[dp] = eval_tree_cpu_standard(tokens, values, x, num_tokens);
+                        pred[dp] = eval_tree_cpu(tokens, values, nullptr, x, nullptr, 0, num_tokens);
                 }
             }
             delete[] x;
@@ -318,9 +293,9 @@ void eval_cpu_common_subtree_batch(InputInfo &input_info, double ***all_vars, do
                 for (int i = 0; i <= num_vars; i++) x[i] = vars[i][dp];
                 
                 if (detect_res.num_subs > 0)
-                    pred[dp] = eval_tree_cpu_optimized(tokens, values, hints, x, cached_results, dp, num_tokens);
+                    pred[dp] = eval_tree_cpu(tokens, values, hints, x, cached_results, dp, num_tokens);
                 else
-                    pred[dp] = eval_tree_cpu_standard(tokens, values, x, num_tokens);
+                    pred[dp] = eval_tree_cpu(tokens, values, nullptr, x, nullptr, 0, num_tokens);
             }
         }
         delete[] x;
@@ -363,10 +338,13 @@ static void fill_new_subtrees_in_cache(
                 for (int i = 0; i <= num_vars; i++) x[i] = vars[i][dp];
                 for (int sub_id : new_sub_ids)
                 {
-                    cache.results[sub_id][dp] = eval_tree_cpu_standard(
+                    cache.results[sub_id][dp] = eval_tree_cpu(
                         cache.sub_tokens[sub_id], 
                         cache.sub_values[sub_id], 
+                        nullptr,
                         x, 
+                        nullptr,
+                        0,
                         cache.sub_sizes[sub_id]);
                 }
             }
@@ -386,7 +364,7 @@ static void fill_new_subtrees_in_cache(
             for (int dp = 0; dp < total_dps; dp++)
             {
                 for (int i = 0; i <= num_vars; i++) x[i] = vars[i][dp];
-                cache.results[sub_id][dp] = eval_tree_cpu_standard(sub_toks, sub_vals, x, sub_len);
+                cache.results[sub_id][dp] = eval_tree_cpu(sub_toks, sub_vals, nullptr, x, nullptr, 0, sub_len);
             }
         }
         delete[] x;
@@ -429,9 +407,9 @@ static void evaluate_batch_with_cache(
                     for (int i = 0; i <= num_vars; i++) x[i] = vars[i][dp];
                     
                     if (cached_results_ptr)
-                        pred[dp] = eval_tree_cpu_optimized(tokens, values, hints, x, cached_results_ptr, dp, num_tokens);
+                        pred[dp] = eval_tree_cpu(tokens, values, hints, x, cached_results_ptr, dp, num_tokens);
                     else
-                        pred[dp] = eval_tree_cpu_standard(tokens, values, x, num_tokens);
+                        pred[dp] = eval_tree_cpu(tokens, values, nullptr, x, nullptr, 0, num_tokens);
                 }
             }
             delete[] x;
@@ -459,9 +437,9 @@ static void evaluate_batch_with_cache(
                 for (int i = 0; i <= num_vars; i++) x[i] = vars[i][dp];
                 
                 if (cached_results_ptr)
-                    pred[dp] = eval_tree_cpu_optimized(tokens, values, hints, x, cached_results_ptr, dp, num_tokens);
+                    pred[dp] = eval_tree_cpu(tokens, values, hints, x, cached_results_ptr, dp, num_tokens);
                 else
-                    pred[dp] = eval_tree_cpu_standard(tokens, values, x, num_tokens);
+                    pred[dp] = eval_tree_cpu(tokens, values, nullptr, x, nullptr, 0, num_tokens);
             }
         }
         delete[] x;
@@ -496,7 +474,7 @@ void eval_cpu_stateful_batch(
         input_info.num_tokens,
         (const int**)input_info.tokens,
         (const double**)input_info.values,
-        3, // min_size
+        2, // min_size
         min_freq
     );
     
@@ -525,90 +503,16 @@ void eval_cpu_stateful_batch(
 // Evolution benchmark runner
 int run_evolution_benchmark(int start_gen, int end_gen, const std::string& data_dir)
 {
-    std::cout << "Running Evolution Benchmark: Gen " << start_gen << " to " << end_gen << std::endl;
-    
     SubtreeCache cache;
-    double total_time_ms = 0.0;
     
-    // Pre-load shared data if possible
-    double** shared_data_ptr = nullptr;
-    int shared_num_vars = 0;
-    int shared_num_dps = 0;
+    // Lambda adapter for stateful eval
+    auto eval_cb = [](InputInfo& info, double*** vars, double** preds, void* state) {
+        SubtreeCache* c = (SubtreeCache*)state;
+        eval_cpu_stateful_batch(info, vars, preds, *c, nullptr);
+        
+        // Print cache size for debugging (optional)
+        // std::cout << " (Cache size: " << c->results.size() << ")";
+    };
     
-    // Check Gen 0 for shared data
-    {
-        std::string filename = data_dir + "/gen_" + std::to_string(start_gen) + ".txt";
-        InputInfo info = parse_input_info(filename);
-        if (info.num_exprs > 0 && info.has_shared_data) {
-            // std::cout << "Pre-loading shared data from " << info.data_filenames[0] << "..." << std::endl;
-            shared_data_ptr = load_data_file(info.data_filenames[0], info.num_vars[0], info.num_dps[0]);
-            shared_num_vars = info.num_vars[0];
-            shared_num_dps = info.num_dps[0];
-        }
-        free_input_info(info);
-    }
-    
-    for (int gen = start_gen; gen <= end_gen; gen++)
-    {
-        std::string filename = data_dir + "/gen_" + std::to_string(gen) + ".txt";
-        InputInfo input_info = parse_input_info(filename);
-        
-        if (input_info.num_exprs == 0) {
-            std::cerr << "Skipping generation " << gen << " (failed to load)" << std::endl;
-            continue;
-        }
-        
-        // Load data (reuse shared if available)
-        double ***all_vars = new double **[input_info.num_exprs];
-        
-        if (input_info.has_shared_data && shared_data_ptr != nullptr) {
-            // Point to pre-loaded data
-            for (int i = 0; i < input_info.num_exprs; i++) {
-                all_vars[i] = shared_data_ptr;
-            }
-        } else {
-            // Fallback to standard loading
-            load_all_data_parallel(input_info, all_vars, 8);
-        }
-        
-        // Allocate predictions
-        double **all_predictions = new double *[input_info.num_exprs];
-        for (int i = 0; i < input_info.num_exprs; i++)
-            all_predictions[i] = new double[input_info.num_dps[i]];
-            
-        // Evaluate statefully
-        TimePoint t0 = measure_clock();
-        eval_cpu_stateful_batch(input_info, all_vars, all_predictions, cache, nullptr);
-        double dt = clock_to_ms(t0, measure_clock());
-        total_time_ms += dt;
-        
-        std::cout << "Gen " << gen << ": " << dt << " ms (Cache size: " << cache.results.size() << ")" << std::endl;
-        
-        // Cleanup
-        for (int i = 0; i < input_info.num_exprs; i++) delete[] all_predictions[i];
-        delete[] all_predictions;
-        
-        if (input_info.has_shared_data && shared_data_ptr != nullptr) {
-            // Do NOT free shared data here, just the array of pointers
-            delete[] all_vars; // Free the array of pointers itself
-        } else {
-            // Free individually
-             for (int i = 0; i < input_info.num_exprs; i++) {
-                for(int j=0; j<=input_info.num_vars[i]; j++) free(all_vars[i][j]);
-                free(all_vars[i]);
-             }
-             delete[] all_vars;
-        }
-        free_input_info(input_info);
-    }
-    
-    // Free shared data at the end
-    if (shared_data_ptr != nullptr) {
-        // std::cout << "Freeing shared data..." << std::endl;
-        for(int i=0; i<=shared_num_vars; i++) free(shared_data_ptr[i]);
-        free(shared_data_ptr);
-    }
-    
-    std::cout << "### Total Evolution Time: " << total_time_ms << " ms ###" << std::endl;
-    return 0;
+    return evaluate_evolution_benchmark(start_gen, end_gen, data_dir, eval_cb, &cache);
 }
