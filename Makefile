@@ -484,6 +484,20 @@ compare_all_evals: $(CPU_EVAL_BIN) $(CPU_MULTI_EVAL_BIN) $(GPU_EVAL_BIN) $(GPU_J
 	@time $(GPU_ASYNC_JINHA_BIN) data/examples/sample_input.txt
 
 # ============================================================================
+# GPU Baseline Evaluator (Two-Stage with Persistent Cache)
+# ============================================================================
+GPU_SIMPLE_JINHA_BIN = $(BUILD_DIR)/gpu_simple_jinha
+GPU_SIMPLE_JINHA_SRC = src/eval/gpu_simple_jinha.cu
+
+$(GPU_SIMPLE_JINHA_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(GPU_SIMPLE_JINHA_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_SIMPLE_JINHA_SRC) src/eval/common_eval.cpp
+
+# Default GPU Subtree run target
+gpu_simple_jinha: $(GPU_SIMPLE_JINHA_BIN)
+
+# ============================================================================
 # GPU Subtree Evaluator (Two-Stage with Persistent Cache)
 # ============================================================================
 GPU_SUBTREE_BIN = $(BUILD_DIR)/gpu_subtree_eval
@@ -625,6 +639,11 @@ bench_test20_gpu_state: gpu_subtree_state_eval
 	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Stateful) ---"
 	@echo ">> GPU Subtree (Stateful)"
 	./build/gpu_subtree_state_eval 0 19 data/evolution_test20
+
+bench_test20_gpu_baseline: gpu_simple_jinha
+	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Baseline eval_tree_device) ---"
+	@echo ">> GPU Jinha Baseline (Multi-Expr Batch)"
+	./build/gpu_simple_jinha -evolution 0 19 data/evolution_test20
 
 # Run Benchmarks (Stateful vs Stateless Multi-threaded)
 bench_long: cpu_common cpu_multi_eval
