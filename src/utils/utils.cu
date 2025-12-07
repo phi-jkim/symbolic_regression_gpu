@@ -1279,7 +1279,13 @@ extern "C" void eval_tree_gpu_async(
 //     return (sp > 0) ? static_stack_pop(stk, sp) : 0.0f;
 // }
 
-__device__ inline float eval_tree_device(const int* tokens, const float* values, const float* x, int len, int num_features) {
+__device__ inline float eval_tree_device(const int* tokens,
+                                         const float* values,
+                                         const float* d_vars_flat,
+                                         int len,
+                                         int num_features,
+                                         int num_dps,
+                                         int dp_idx) {
     float stk[MAX_EVAL_STACK];
     int sp = 0;
     int output = 0; 
@@ -1297,7 +1303,8 @@ __device__ inline float eval_tree_device(const int* tokens, const float* values,
                 float b = stk[--sp];
                 // --sp; 
                 // float b = 0.0; 
-                stk[sp++] = apply_op(1, a, b);
+                stk[sp++] = apply_op(tok, a, b);
+                // stk[sp++] = (a, b);
                 // sp++; 
                 // stk[sp++] = 0; 
             } else { // unary
@@ -1314,9 +1321,12 @@ __device__ inline float eval_tree_device(const int* tokens, const float* values,
             // tok = values[i];
             // sp++;
         } else if (tok == -1) { // variable
-            stk[sp++] = x[(int)values[i]];
-            // tok = x[(int)values[i]];
-            // sp++;
+            int var_idx = (int)values[i];
+            if (var_idx >= 0 && var_idx <= num_features) {
+                stk[sp++] = d_vars_flat[var_idx * num_dps + dp_idx];
+            } else {
+                stk[sp++] = 0.0f;
+            }
         }
     }
     return stk[--sp];
@@ -1394,12 +1404,12 @@ __global__ void eval_prefix_kernel_multi_expression_batch(
     if (dp_idx >= num_dps) return;
     
     // Prepare input variables for this datapoint (shared by all expressions in this block)
-    float x[MAX_NUM_FEATURES];
-    #pragma unroll
-    for (int i = 0; i <= num_vars; i++) {
-        // vars_flat is laid out as [var0_dp0, var0_dp1, ..., var1_dp0, var1_dp1, ...]
-        x[i] = d_vars_flat[i * num_dps + dp_idx];
-    }
+    // float x[MAX_NUM_FEATURES];
+    // #pragma unroll
+    // for (int i = 0; i <= num_vars; i++) {
+    //     // vars_flat is laid out as [var0_dp0, var0_dp1, ..., var1_dp0, var1_dp1, ...]
+    //     x[i] = d_vars_flat[i * num_dps + dp_idx];
+    // }
     
     // Process all expressions assigned to this threadblock
     for (int expr_idx = block_expr_start; expr_idx < block_expr_end; expr_idx++) {
@@ -1413,7 +1423,13 @@ __global__ void eval_prefix_kernel_multi_expression_batch(
         float *d_pred = d_pred_batch + (expr_idx * num_dps);
         
         // Evaluate expression for this datapoint
-        d_pred[dp_idx] = eval_tree_device(d_tokens, d_values, x, num_tokens, num_vars);
+        d_pred[dp_idx] = eval_tree_device(d_tokens,
+                                          d_values,
+                                          d_vars_flat,
+                                          num_tokens,
+                                          num_vars,
+                                          num_dps,
+                                          dp_idx);
     }
 }
 
@@ -1427,4 +1443,43 @@ extern "C" void launch_eval_prefix_kernel_multi_expression_batch(
     eval_prefix_kernel_multi_expression_batch<<<grid, threads_per_block>>>(
         d_tokens_batch, d_values_batch, d_token_offsets, d_num_tokens,
         d_vars_flat, d_pred_batch, num_vars, num_dps, num_exprs, exprs_per_block);
+}
+
+__global__ void regression_mse_kernel(
+    const float *preds,
+    const double *labels,
+    double *mse,
+    unsigned int num_exprs,
+    unsigned int total_dps)
+{
+    unsigned int expr = blockIdx.x;
+    unsigned int block_dp = blockIdx.y;
+    unsigned int tid = threadIdx.x;
+    unsigned int dp = block_dp * blockDim.x + tid;
+
+    __shared__ double shared_err[EVAL_MAX_THREADS_PER_BLOCK];
+
+    double err = 0.0;
+    if (expr < num_exprs && dp < total_dps) {
+        size_t idx = (size_t)expr * (size_t)total_dps + (size_t)dp;
+        double diff = (double)preds[idx] - labels[idx];
+        err = (diff * diff) / (double)total_dps;
+    }
+
+    if (tid < blockDim.x) {
+        shared_err[tid] = err;
+    }
+
+    __syncthreads();
+
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride && (tid + stride) < blockDim.x) {
+            shared_err[tid] += shared_err[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0 && expr < num_exprs) {
+        atomicAdd(&mse[expr], shared_err[0]);
+    }
 }

@@ -13,6 +13,9 @@
 
 #define OP_REF -2
 #define MAX_CACHED_SUBTREES 10000
+#define MIN_SUBTREE_SIZE 3
+
+#define MAX_CACHED_PER_THREAD ((MAX_STACK_SIZE + MIN_SUBTREE_SIZE - 1) / MIN_SUBTREE_SIZE)
 
 #define CUDA_CHECK(call)                                                       \
   do {                                                                         \
@@ -92,11 +95,15 @@ __device__ float eval_op_gpu_state(int op, float val1, float val2) {
   }
 }
 
-#define STACK_PUSH(v) do { stk[sp] = (v); sp++; } while (0)
+#define STACK_PUSH(v) (stk[sp++] = (v))
 #define STACK_POP()   (stk[--sp])
 
 #ifndef MAX_NUM_FEATURES
 #define MAX_NUM_FEATURES 16
+#endif
+
+#ifndef MAX_FEATURES
+#define MAX_FEATURES MAX_NUM_FEATURES
 #endif
 
 // =============================================================================
@@ -125,12 +132,12 @@ __global__ void eval_subtrees_kernel_state(
   if (dp_idx >= total_dps) return;
 
   // Cache a small slice of X in registers
-  float x_cache[MAX_NUM_FEATURES];
-  int limit_vars = (num_vars + 1 < MAX_NUM_FEATURES) ? num_vars + 1 : MAX_NUM_FEATURES;
+//   float x_cache[MAX_STACK];
+  // int limit_vars = (num_vars + 1 < MAX_NUM_FEATURES) ? num_vars + 1 : MAX_NUM_FEATURES;
 
-  for (int v = 0; v < limit_vars; v++) {
-    x_cache[v] = d_X_col_major[v * total_dps + dp_idx];
-  }
+//   for (int v = 0; v < limit_vars; v++) {
+//     x_cache[v] = d_X_col_major[v * total_dps + dp_idx];
+//   }
 
   for (int sub_idx = block_sub_start; sub_idx < block_sub_end; sub_idx++) {
     int offset    = d_offsets[sub_idx];
@@ -151,10 +158,10 @@ __global__ void eval_subtrees_kernel_state(
         STACK_PUSH(d_values[offset + i]);
       } else if (tok == -1) {
         int var_idx = (int)d_values[offset + i];
-        if (var_idx < limit_vars)
-          STACK_PUSH(x_cache[var_idx]);
-        else
-          STACK_PUSH(d_X_col_major[var_idx * total_dps + dp_idx]);
+        // if (var_idx < limit_vars)
+        //   STACK_PUSH(x_cache[var_idx]);
+        // else
+        STACK_PUSH(d_X_col_major[var_idx * total_dps + dp_idx]);
       }
     }
 
@@ -162,13 +169,89 @@ __global__ void eval_subtrees_kernel_state(
   }
 }
 
+// // Stage 2: evaluate skeleton expressions using cached subtree results
+// __global__ void eval_skeletons_kernel_state(
+//     const int *d_tokens,
+//     const float *d_values,
+//     const int *d_offsets,
+//     const int *d_lengths,
+//     const float *d_X_col_major,
+//     const float *d_cache_results,
+//     float *d_preds,
+//     int num_exprs,
+//     int num_vars,
+//     int total_dps,
+//     int exprs_per_block) {
+
+//   int block_expr_start = blockIdx.x * exprs_per_block;
+//   int block_expr_end   = min(block_expr_start + exprs_per_block, num_exprs);
+//   int dp_start         = blockIdx.y * blockDim.x;
+//   int dp_idx           = dp_start + threadIdx.x;
+
+//   if (dp_idx >= total_dps) return;
+//   extern __shared__ float cached_results_shared[];
+//   float *cached_results = &cached_results_shared[threadIdx.x * MAX_CACHED_PER_THREAD];
+
+//   for (int expr_idx = block_expr_start; expr_idx < block_expr_end; expr_idx++) {
+//     int offset = d_offsets[expr_idx];
+//     int len    = d_lengths[expr_idx];
+
+//     float stk[MAX_STACK_SIZE];
+//     int sp = 0;
+//     int ref_count = 0;
+
+//     for (int i = len - 1; i >= 0; i--) {
+//       int tok = d_tokens[offset + i];
+//       if (tok == OP_REF) {
+//         int cache_idx = (int)d_values[offset + i];
+//         if (ref_count < MAX_CACHED_PER_THREAD) {
+//           cached_results[ref_count++] = d_cache_results[cache_idx * total_dps + dp_idx];
+//         }
+//       }
+//     }
+
+//     int ref_pos = 0;
+
+//     for (int i = len - 1; i >= 0; i--) {
+//       int tok = d_tokens[offset + i];
+
+//       if (tok == OP_REF) {
+//         // int cache_idx = (int)d_values[offset + i];
+//         // STACK_PUSH(d_cache_results[cache_idx * total_dps + dp_idx]);
+//         STACK_PUSH(cached_results[ref_pos++]);
+//       } else if (tok > 0) {
+//         float v1 = STACK_POP();
+//         float v2 = 0.0f;
+//         if (tok < 10) v2 = STACK_POP();
+//         STACK_PUSH(eval_op_gpu_state(tok, v1, v2));
+//       } else if (tok == 0) {
+//         STACK_PUSH(d_values[offset + i]);
+//       } else if (tok == -1) {
+//         int var_idx = (int)d_values[offset + i];
+//         // if (var_idx < limit_vars)
+//         //   STACK_PUSH(x_cache[var_idx]);
+//         // else
+//         STACK_PUSH(d_X_col_major[var_idx * total_dps + dp_idx]);
+//       }
+//     }
+
+//     d_preds[expr_idx * total_dps + dp_idx] = stk[0];
+//   }
+// }
+
 // Stage 2: evaluate skeleton expressions using cached subtree results
+// d_ref_slots layout: [expr_idx * MAX_CACHED_PER_THREAD + ref_pos] = cache slot ID,
+// where ref_pos enumerates OP_REF tokens in that expression when scanning tokens
+// right-to-left (ref_pos = 0 is the first OP_REF seen from the right).
+// d_ref_counts[expr_idx] stores how many valid entries exist for that expr.
 __global__ void eval_skeletons_kernel_state(
     const int *d_tokens,
     const float *d_values,
     const int *d_offsets,
     const int *d_lengths,
     const float *d_X_col_major,
+    const int *d_ref_slots,
+    const int *d_ref_counts,
     const float *d_cache_results,
     float *d_preds,
     int num_exprs,
@@ -183,11 +266,14 @@ __global__ void eval_skeletons_kernel_state(
 
   if (dp_idx >= total_dps) return;
 
-  float x_cache[MAX_NUM_FEATURES];
-  int limit_vars = (num_vars + 1 < MAX_NUM_FEATURES) ? num_vars + 1 : MAX_NUM_FEATURES;
+  // extern __shared__ float cached_results_shared[];
+  // float *thread_cache = &cached_results_shared[threadIdx.x * MAX_CACHED_PER_THREAD];
 
-  for (int v = 0; v < limit_vars; v++) {
-    x_cache[v] = d_X_col_major[v * total_dps + dp_idx];
+  extern __shared__ float x_cache[];
+  // float *cached_results = thread_cache;
+  int limit_vars = (num_vars < MAX_FEATURES) ? (num_vars) : MAX_FEATURES;
+  for (int v = 0; v < limit_vars; ++v) {
+    x_cache[v * blockDim.x + threadIdx.x] = d_X_col_major[v * total_dps + dp_idx];
   }
 
   for (int expr_idx = block_expr_start; expr_idx < block_expr_end; expr_idx++) {
@@ -196,6 +282,24 @@ __global__ void eval_skeletons_kernel_state(
 
     float stk[MAX_STACK_SIZE];
     int sp = 0;
+    // int base = expr_idx * MAX_CACHED_PER_THREAD;
+    // int ref_count = d_ref_counts[expr_idx];
+    // for (int r = 0; r < ref_count && r < MAX_CACHED_PER_THREAD; ++r) {
+    //   int cache_idx = d_ref_slots[base + r];
+    //   cached_results[r] = d_cache_results[cache_idx * total_dps + dp_idx];
+    // }
+    // float *cached_results = thread_cache;
+    // // Preload cached subtree results for this expression using precomputed
+    // // cache slot indices (right-to-left ordering in d_ref_slots).
+    // int base = expr_idx * MAX_CACHED_PER_THREAD;
+    // int ref_count = d_ref_counts[expr_idx];
+    // #pragma unroll 
+    // for (int r = 0; r < ref_count; ++r) {
+    //   int cache_idx = d_ref_slots[base + r];
+    //   cached_results[r] = d_cache_results[cache_idx * total_dps + dp_idx];
+    // }
+
+    int ref_pos = 0;
 
     for (int i = len - 1; i >= 0; i--) {
       int tok = d_tokens[offset + i];
@@ -203,6 +307,7 @@ __global__ void eval_skeletons_kernel_state(
       if (tok == OP_REF) {
         int cache_idx = (int)d_values[offset + i];
         STACK_PUSH(d_cache_results[cache_idx * total_dps + dp_idx]);
+        // STACK_PUSH(cached_results[ref_pos++]);
       } else if (tok > 0) {
         float v1 = STACK_POP();
         float v2 = 0.0f;
@@ -212,10 +317,15 @@ __global__ void eval_skeletons_kernel_state(
         STACK_PUSH(d_values[offset + i]);
       } else if (tok == -1) {
         int var_idx = (int)d_values[offset + i];
-        if (var_idx < limit_vars)
-          STACK_PUSH(x_cache[var_idx]);
-        else
+        if (var_idx >= 0 && var_idx < limit_vars) {
+          STACK_PUSH(x_cache[var_idx * blockDim.x + threadIdx.x]);
+        } else {
           STACK_PUSH(d_X_col_major[var_idx * total_dps + dp_idx]);
+        }
+        // if (var_idx < limit_vars)
+        //   STACK_PUSH(x_cache[var_idx]);
+        // else
+        // STACK_PUSH(d_X_col_major[var_idx * total_dps + dp_idx]);
       }
     }
 
@@ -292,7 +402,7 @@ static void mark_cached_subtrees_from_state(
     SubtreeDetectionResult &result) {
 
   int num_exprs = input_info.num_exprs;
-  const int min_size_state = 3;  // same as detect_common_subtrees default
+  const int min_size_state = MIN_SUBTREE_SIZE;  // same as detect_common_subtrees default
 
   for (int expr = 0; expr < num_exprs; ++expr) {
     int    len   = input_info.num_tokens[expr];
@@ -357,7 +467,7 @@ void eval_gpu_subtree_batch_state(
       input_info.num_tokens,
       (const int **)input_info.tokens,
       (const double **)input_info.values,
-      3,
+      MIN_SUBTREE_SIZE,
       2);
 
   // Step 2: Map detected subtrees to persistent cache slots
@@ -384,8 +494,6 @@ void eval_gpu_subtree_batch_state(
       subtree_id_to_slot[i] = it->second;
     }
   }
-
-  printf("Max num features: %d\n", MAX_NUM_FEATURES);
 
   std::cout << "[gpu_subtree_state] New subtrees this gen: "
             << new_subtree_indices.size() << std::endl;
@@ -433,7 +541,8 @@ void eval_gpu_subtree_batch_state(
   }
 
   // Step 4: Prepare skeleton expressions (with OP_REF placeholders)
-  int *d_skel_tokens = nullptr, *d_skel_offsets = nullptr, *d_skel_lengths = nullptr;
+  int *d_skel_tokens = nullptr, *d_skel_offsets = nullptr, *d_skel_lengths = nullptr,
+      *d_skel_ref_slots = nullptr, *d_skel_ref_counts = nullptr;
   float *d_skel_values = nullptr;
   float *d_preds = nullptr;
 
@@ -448,6 +557,7 @@ void eval_gpu_subtree_batch_state(
     int    *toks  = input_info.tokens[i];
     double *vals  = input_info.values[i];
     int     len   = input_info.num_tokens[i];
+    // printf("len: %d\n", len);
     int    *hints = result.expr_sub_hints[i];
 
     for (int k = 0; k < len; k++) {
@@ -470,16 +580,49 @@ void eval_gpu_subtree_batch_state(
     h_skel_lengths.push_back((int)h_skel_tokens.size() - h_skel_offsets.back());
   }
 
+  // Precompute cache slot indices and counts per expression for skeleton OP_REFs.
+  // For each expr i:
+  //   - h_skel_ref_slots[i * MAX_CACHED_PER_THREAD + ref_pos] stores the cache slot ID
+  //     of the ref_pos-th OP_REF encountered when scanning that expression's
+  //     skeleton tokens from right to left.
+  //   - h_skel_ref_counts[i] stores how many valid entries exist for that expr.
+  std::vector<int> h_skel_ref_slots((size_t)num_exprs * (size_t)MAX_CACHED_PER_THREAD, -1);
+  std::vector<int> h_skel_ref_counts(num_exprs, 0);
+  for (int i = 0; i < num_exprs; ++i) {
+    int start = h_skel_offsets[i];
+    int len   = h_skel_lengths[i];
+    int ref_pos = 0;
+    for (int idx = start + len - 1;
+         idx >= start && ref_pos < MAX_CACHED_PER_THREAD;
+         --idx) {
+      if (h_skel_tokens[idx] == OP_REF) {
+        int slot = (int)h_skel_values[idx];
+        h_skel_ref_slots[(size_t)i * (size_t)MAX_CACHED_PER_THREAD + (size_t)ref_pos] = slot;
+        ++ref_pos;
+      }
+    }
+    h_skel_ref_counts[i] = ref_pos;
+  }
+
   CUDA_CHECK(cudaMalloc(&d_skel_tokens,  h_skel_tokens.size() * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_skel_values,  h_skel_values.size() * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_skel_offsets, num_exprs * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_skel_lengths, num_exprs * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_skel_ref_slots,
+                        (size_t)num_exprs * (size_t)MAX_CACHED_PER_THREAD * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_skel_ref_counts, num_exprs * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_preds,        (size_t)num_exprs * (size_t)total_dps * sizeof(float)));
 
   CUDA_CHECK(cudaMemcpy(d_skel_tokens,  h_skel_tokens.data(),  h_skel_tokens.size() * sizeof(int),   cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_skel_values,  h_skel_values.data(),  h_skel_values.size() * sizeof(float), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_skel_offsets, h_skel_offsets.data(), num_exprs * sizeof(int),              cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_skel_lengths, h_skel_lengths.data(), num_exprs * sizeof(int),              cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_skel_ref_slots, h_skel_ref_slots.data(),
+                        (size_t)num_exprs * (size_t)MAX_CACHED_PER_THREAD * sizeof(int),
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_skel_ref_counts, h_skel_ref_counts.data(),
+                        num_exprs * sizeof(int),
+                        cudaMemcpyHostToDevice));
 
   // Step 5: Upload full dataset X once (no batching over datapoints)
   float *d_X = nullptr;
@@ -497,6 +640,11 @@ void eval_gpu_subtree_batch_state(
   // Step 6: Launch kernels over all datapoints at once
   int threads  = 128;
   int blocks_y = (total_dps + threads - 1) / threads;
+  // const int max_features_sh = num_vars;
+  printf("num_vars: %d\n", num_vars);
+  size_t shared_bytes = (size_t)num_vars *
+                        (size_t)threads *
+                        sizeof(float);
 
   // Use CUDA events to time subtree kernel and skeleton kernel separately
   cudaEvent_t ev_start, ev_mid, ev_stop;
@@ -529,15 +677,18 @@ void eval_gpu_subtree_batch_state(
     int exprs_per_block = 4;
     int blocks_x = (num_exprs + exprs_per_block - 1) / exprs_per_block;
     dim3 grid(blocks_x, blocks_y);
-    eval_skeletons_kernel_state<<<grid, threads>>>(
+    eval_skeletons_kernel_state<<<grid, threads, shared_bytes>>>(
         d_skel_tokens, d_skel_values, d_skel_offsets, d_skel_lengths,
         d_X,
+        d_skel_ref_slots,
+        d_skel_ref_counts,
         ctx.d_results,
         d_preds,
         num_exprs,
         num_vars,
         total_dps,
         exprs_per_block);
+    
   }
 
   CUDA_CHECK(cudaEventRecord(ev_stop));
@@ -584,6 +735,8 @@ void eval_gpu_subtree_batch_state(
   CUDA_CHECK(cudaFree(d_skel_values));
   CUDA_CHECK(cudaFree(d_skel_offsets));
   CUDA_CHECK(cudaFree(d_skel_lengths));
+  CUDA_CHECK(cudaFree(d_skel_ref_slots));
+  CUDA_CHECK(cudaFree(d_skel_ref_counts));
   CUDA_CHECK(cudaFree(d_preds));
 
   if (num_new > 0) {
