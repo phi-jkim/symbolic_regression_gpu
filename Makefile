@@ -631,6 +631,16 @@ bench_test20_gpu_simple_original: $(GPU_EVAL_BIN)
 	@echo ">> GPU Simple (Original)"
 	./build/gpu_eval -evolution 0 19 data/evolution_test20
 
+bench_test20_gpu_jinha: $(GPU_JINHA_EVOLVE_BIN)
+	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Jinha Batch) ---"
+	@echo ">> GPU Jinha (Multi-Expr Batch)"
+	./build/gpu_jinha_evolve -evolution 0 19 data/evolution_test20
+
+bench_test20_gpu_custom: $(GPU_CUSTOM_PEREXPR_BIN)
+	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Custom Kernel) ---"
+	@echo ">> GPU Custom Kernel (Per-Expr)"
+	./build/gpu_custom_kernel_perexpression_evolve -evolution 0 19 data/evolution_test20
+
 # Run Benchmarks (Stateful vs Stateless Multi-threaded)
 bench_long: cpu_common cpu_multi_eval
 	@echo "--- Running Long & Large Benchmark (20 gens, 500k dps) ---"
