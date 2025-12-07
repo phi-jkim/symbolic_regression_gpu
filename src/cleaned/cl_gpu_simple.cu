@@ -1,94 +1,12 @@
 #include "../utils/utils.h"
 #include "../utils/opcodes.h"
+#include "cl_gpu_common.h"
 #include <cuda_runtime.h>
 #include <vector>
 #include <iostream>
 
 #define OP_REF -2
 #define MAX_STACK_SIZE 50
-
-#ifndef MAX_NUM_FEATURES
-#define MAX_NUM_FEATURES 32
-#endif
-
-#define CUDA_CHECK(call)                                                       \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      fprintf(stderr, "CUDA Error at %s:%d - %s\n", __FILE__, __LINE__,        \
-              cudaGetErrorString(err));                                        \
-      exit(EXIT_FAILURE);                                                      \
-    }                                                                          \
-  } while (0)
-
-// Persistent GPU context for simple evaluator
-struct SimpleGPUContext {
-  // Cached buffers for evaluation
-  int *d_tokens = nullptr;
-  float *d_values = nullptr;
-  int *d_offsets = nullptr;
-  int *d_lengths = nullptr;
-  
-  float *d_sq_errors = nullptr;
-  double *d_mses = nullptr;
-  
-  size_t alloc_tokens = 0;
-  size_t alloc_values = 0;
-  size_t alloc_meta = 0; // for offsets, lengths (num_exprs)
-  size_t alloc_sq_errors = 0; // num_exprs * total_dps
-  size_t alloc_mses = 0;      // num_exprs
-
-  // Cached buffer for input data
-  float *d_X = nullptr;
-  size_t alloc_X = 0;
-
-  ~SimpleGPUContext() {
-    if (d_tokens) CUDA_CHECK(cudaFree(d_tokens));
-    if (d_values) CUDA_CHECK(cudaFree(d_values));
-    if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
-    if (d_lengths) CUDA_CHECK(cudaFree(d_lengths));
-    if (d_sq_errors) CUDA_CHECK(cudaFree(d_sq_errors));
-    if (d_mses) CUDA_CHECK(cudaFree(d_mses));
-    if (d_X) CUDA_CHECK(cudaFree(d_X));
-  }
-
-  void ensure_buffers(size_t num_tokens, size_t num_values, size_t num_exprs, size_t total_dps) {
-    if (num_tokens > alloc_tokens) {
-        if (d_tokens) CUDA_CHECK(cudaFree(d_tokens));
-        alloc_tokens = (size_t)(num_tokens * 1.5);
-        CUDA_CHECK(cudaMalloc(&d_tokens, alloc_tokens * sizeof(int)));
-    }
-    if (num_values > alloc_values) {
-        if (d_values) CUDA_CHECK(cudaFree(d_values));
-        alloc_values = (size_t)(num_values * 1.5);
-        CUDA_CHECK(cudaMalloc(&d_values, alloc_values * sizeof(float)));
-    }
-    if (num_exprs > alloc_meta) {
-        if (d_offsets) CUDA_CHECK(cudaFree(d_offsets));
-        if (d_lengths) CUDA_CHECK(cudaFree(d_lengths));
-        if (d_mses) CUDA_CHECK(cudaFree(d_mses));
-        alloc_meta = (size_t)(num_exprs * 1.5);
-        alloc_mses = alloc_meta;
-        CUDA_CHECK(cudaMalloc(&d_offsets, alloc_meta * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&d_lengths, alloc_meta * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&d_mses, alloc_mses * sizeof(double)));
-    }
-    size_t req_sq_errors = num_exprs * total_dps;
-    if (req_sq_errors > alloc_sq_errors) {
-        if (d_sq_errors) CUDA_CHECK(cudaFree(d_sq_errors));
-        alloc_sq_errors = (size_t)(req_sq_errors * 1.2);
-        CUDA_CHECK(cudaMalloc(&d_sq_errors, alloc_sq_errors * sizeof(float)));
-    }
-  }
-
-  void ensure_X_buffer(size_t size_floats) {
-      if (size_floats > alloc_X) {
-          if (d_X) CUDA_CHECK(cudaFree(d_X));
-          alloc_X = (size_t)(size_floats * 1.2);
-          CUDA_CHECK(cudaMalloc(&d_X, alloc_X * sizeof(float)));
-      }
-  }
-};
 
 // Device helper: Evaluate op (same as optimized version)
 __device__ float eval_op_gpu_simple(int op, float val1, float val2) {
