@@ -145,21 +145,6 @@ int main(int argc, char** argv) {
             for(int i=0; i<std::min(5, info.num_exprs); i++) {
                 std::cout << "  Expr " << i << ": " << cpu_mses[i] << " vs " << gpu_simple_mses[i] << " vs " << gpu_mses[i] << std::endl;
             }
-        } else {
-            // Verify Simple vs Opt
-            double max_diff = 0.0;
-            for(int i=0; i<info.num_exprs; i++) {
-                double diff = std::abs(gpu_simple_mses[i] - gpu_mses[i]);
-                if (std::isnan(gpu_simple_mses[i]) && std::isnan(gpu_mses[i])) diff = 0.0;
-                if (diff > max_diff) max_diff = diff;
-            }
-            std::cout << "Max MSE Diff (Simple vs Opt): " << max_diff << std::endl;
-
-            // Print first 5 GPU MSEs
-            std::cout << "Sample MSEs (Simple vs Opt):" << std::endl;
-            for(int i=0; i<std::min(5, info.num_exprs); i++) {
-                std::cout << "  Expr " << i << ": " << gpu_simple_mses[i] << " vs " << gpu_mses[i] << std::endl;
-            }
         }
 
         delete[] all_vars;

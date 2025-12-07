@@ -346,11 +346,27 @@ void evaluate_gpu_mse(
 
   ctx.ensure_capacity(total_dps);
 
+  // Timers
+  float t_cpu_detect = 0.0f;
+  float t_h2d_sub = 0.0f;
+  float t_h2d_skel = 0.0f;
+  float t_h2d_X = 0.0f;
+  float t_kernel_sub = 0.0f;
+  float t_kernel_skel = 0.0f;
+  float t_kernel_reduce = 0.0f;
+  float t_d2h = 0.0f;
+
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+
   // 1. Detect subtrees
   nvtxRangePush("CPU: Parse & Split Trees");
+  TimePoint t1 = measure_clock();
   SubtreeDetectionResult result = detect_common_subtrees(
       num_exprs, num_vars, input_info.num_tokens,
       (const int **)input_info.tokens, (const double **)input_info.values, 3, 2);
+  t_cpu_detect = (float)clock_to_ms(t1, measure_clock());
   nvtxRangePop();
 
   // 2. Update cache
@@ -386,11 +402,17 @@ void evaluate_gpu_mse(
     
     ctx.ensure_sub_buffers(h_sub_tokens.size(), h_sub_values.size(), num_new);
 
+    cudaEventRecord(start);
     CUDA_CHECK(cudaMemcpy(ctx.d_sub_tokens, h_sub_tokens.data(), h_sub_tokens.size() * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(ctx.d_sub_values, h_sub_values.data(), h_sub_values.size() * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(ctx.d_sub_offsets, h_sub_offsets.data(), num_new * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(ctx.d_sub_lengths, h_sub_lengths.data(), num_new * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(ctx.d_sub_slots, new_cache_slots.data(), num_new * sizeof(int), cudaMemcpyHostToDevice));
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float ms = 0;
+    cudaEventElapsedTime(&ms, start, stop);
+    t_h2d_sub += ms;
   }
 
   // 4. Prepare skeletons
@@ -423,19 +445,30 @@ void evaluate_gpu_mse(
 
   ctx.ensure_skel_buffers(h_skel_tokens.size(), h_skel_values.size(), num_exprs, total_dps);
 
+  cudaEventRecord(start);
   CUDA_CHECK(cudaMemcpy(ctx.d_skel_tokens, h_skel_tokens.data(), h_skel_tokens.size() * sizeof(int), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(ctx.d_skel_values, h_skel_values.data(), h_skel_values.size() * sizeof(float), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(ctx.d_skel_offsets, h_skel_offsets.data(), num_exprs * sizeof(int), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(ctx.d_skel_lengths, h_skel_lengths.data(), num_exprs * sizeof(int), cudaMemcpyHostToDevice));
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  float ms = 0;
+  cudaEventElapsedTime(&ms, start, stop);
+  t_h2d_skel += ms;
 
   // 5. Upload X
-  // Only upload if needed, but for now we upload every time to be safe (unless we track changes)
-  // But we reuse the buffer.
   size_t x_size_floats = (size_t)(num_vars + 1) * (size_t)total_dps;
   ctx.ensure_X_buffer(x_size_floats);
   
   float *h_X = flatten_X_col_major_full(all_vars[0], num_vars, total_dps);
+  
+  cudaEventRecord(start);
   CUDA_CHECK(cudaMemcpy(ctx.d_X, h_X, x_size_floats * sizeof(float), cudaMemcpyHostToDevice));
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  cudaEventElapsedTime(&ms, start, stop);
+  t_h2d_X += ms;
+  
   delete[] h_X;
 
   // 6. Launch kernels
@@ -446,31 +479,67 @@ void evaluate_gpu_mse(
     int subtrees_per_block = 4;
     int blocks_x = (num_new + subtrees_per_block - 1) / subtrees_per_block;
     dim3 grid(blocks_x, blocks_y);
+    
+    cudaEventRecord(start);
     eval_subtrees_kernel<<<grid, threads>>>(
         ctx.d_sub_tokens, ctx.d_sub_values, ctx.d_sub_offsets, ctx.d_sub_lengths,
         ctx.d_X, ctx.d_results, ctx.d_sub_slots, num_new, num_vars, total_dps, subtrees_per_block);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&ms, start, stop);
+    t_kernel_sub += ms;
   }
 
   {
     int exprs_per_block = 4;
     int blocks_x = (num_exprs + exprs_per_block - 1) / exprs_per_block;
     dim3 grid(blocks_x, blocks_y);
+    
+    cudaEventRecord(start);
     eval_skeletons_kernel<<<grid, threads>>>(
         ctx.d_skel_tokens, ctx.d_skel_values, ctx.d_skel_offsets, ctx.d_skel_lengths,
         ctx.d_X, ctx.d_results, ctx.d_sq_errors, num_exprs, num_vars, total_dps, exprs_per_block);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&ms, start, stop);
+    t_kernel_skel += ms;
   }
   
   // 7. Reduce MSE
-  // One block per expression
-  int reduce_threads = 256; // Must be power of 2
+  int reduce_threads = 256; 
   size_t shared_mem = reduce_threads * (sizeof(double) + sizeof(int));
+  
+  cudaEventRecord(start);
   reduce_mse_kernel<<<num_exprs, reduce_threads, shared_mem>>>(ctx.d_sq_errors, ctx.d_mses, num_exprs, total_dps);
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  cudaEventElapsedTime(&ms, start, stop);
+  t_kernel_reduce += ms;
 
   // 8. Copy back MSEs
   mses.resize(num_exprs);
+  
+  cudaEventRecord(start);
   CUDA_CHECK(cudaMemcpy(mses.data(), ctx.d_mses, num_exprs * sizeof(double), cudaMemcpyDeviceToHost));
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  cudaEventElapsedTime(&ms, start, stop);
+  t_d2h += ms;
 
   free_subtree_detection_result(result);
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+
+  // Print breakdown
+  std::cout << "  [GPU Opt Breakdown]" << std::endl;
+  std::cout << "    CPU Tree Detect: " << t_cpu_detect << " ms" << std::endl;
+  std::cout << "    H2D (Subtrees):  " << t_h2d_sub << " ms" << std::endl;
+  std::cout << "    H2D (Skeletons): " << t_h2d_skel << " ms" << std::endl;
+  std::cout << "    H2D (Data X):    " << t_h2d_X << " ms" << std::endl;
+  std::cout << "    Kernel (Sub):    " << t_kernel_sub << " ms" << std::endl;
+  std::cout << "    Kernel (Skel):   " << t_kernel_skel << " ms" << std::endl;
+  std::cout << "    Kernel (Reduce): " << t_kernel_reduce << " ms" << std::endl;
+  std::cout << "    D2H (Results):   " << t_d2h << " ms" << std::endl;
 }
 
 // C-style wrappers for linking with C++ main

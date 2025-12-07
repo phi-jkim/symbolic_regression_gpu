@@ -6,7 +6,6 @@
 #include <iostream>
 
 #define OP_REF -2
-#define MAX_STACK_SIZE 50
 
 // Device helper: Evaluate op (same as optimized version)
 __device__ float eval_op_gpu_simple(int op, float val1, float val2) {
@@ -192,6 +191,17 @@ void evaluate_gpu_simple(
   int num_vars  = input_info.num_vars[0];
   int total_dps = input_info.num_dps[0];
 
+  // Timers
+  float t_h2d_tokens = 0.0f;
+  float t_h2d_X = 0.0f;
+  float t_kernel_eval = 0.0f;
+  float t_kernel_reduce = 0.0f;
+  float t_d2h = 0.0f;
+
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+
   // 1. Prepare buffers
   std::vector<int> h_tokens, h_offsets, h_lengths;
   std::vector<float> h_values;
@@ -211,17 +221,30 @@ void evaluate_gpu_simple(
 
   ctx.ensure_buffers(h_tokens.size(), h_values.size(), num_exprs, total_dps);
 
+  cudaEventRecord(start);
   CUDA_CHECK(cudaMemcpy(ctx.d_tokens, h_tokens.data(), h_tokens.size() * sizeof(int), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(ctx.d_values, h_values.data(), h_values.size() * sizeof(float), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(ctx.d_offsets, h_offsets.data(), num_exprs * sizeof(int), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(ctx.d_lengths, h_lengths.data(), num_exprs * sizeof(int), cudaMemcpyHostToDevice));
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  float ms = 0;
+  cudaEventElapsedTime(&ms, start, stop);
+  t_h2d_tokens += ms;
 
   // 2. Upload X
   size_t x_size_floats = (size_t)(num_vars + 1) * (size_t)total_dps;
   ctx.ensure_X_buffer(x_size_floats);
   
   float *h_X = flatten_X_col_major_full_simple(all_vars[0], num_vars, total_dps);
+  
+  cudaEventRecord(start);
   CUDA_CHECK(cudaMemcpy(ctx.d_X, h_X, x_size_floats * sizeof(float), cudaMemcpyHostToDevice));
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  cudaEventElapsedTime(&ms, start, stop);
+  t_h2d_X += ms;
+  
   delete[] h_X;
 
   // 3. Launch kernel
@@ -231,18 +254,46 @@ void evaluate_gpu_simple(
   int blocks_x = (num_exprs + exprs_per_block - 1) / exprs_per_block;
   dim3 grid(blocks_x, blocks_y);
   
+  cudaEventRecord(start);
   eval_simple_kernel<<<grid, threads>>>(
       ctx.d_tokens, ctx.d_values, ctx.d_offsets, ctx.d_lengths,
       ctx.d_X, ctx.d_sq_errors, num_exprs, num_vars, total_dps, exprs_per_block);
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  cudaEventElapsedTime(&ms, start, stop);
+  t_kernel_eval += ms;
 
   // 4. Reduce MSE
   int reduce_threads = 256;
   size_t shared_mem = reduce_threads * (sizeof(double) + sizeof(int));
+  
+  cudaEventRecord(start);
   reduce_mse_kernel_simple<<<num_exprs, reduce_threads, shared_mem>>>(ctx.d_sq_errors, ctx.d_mses, num_exprs, total_dps);
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  cudaEventElapsedTime(&ms, start, stop);
+  t_kernel_reduce += ms;
 
   // 5. Copy back MSEs
   mses.resize(num_exprs);
+  
+  cudaEventRecord(start);
   CUDA_CHECK(cudaMemcpy(mses.data(), ctx.d_mses, num_exprs * sizeof(double), cudaMemcpyDeviceToHost));
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  cudaEventElapsedTime(&ms, start, stop);
+  t_d2h += ms;
+
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+
+  // Print breakdown
+  std::cout << "  [GPU Simple Breakdown]" << std::endl;
+  std::cout << "    H2D (Tokens/Vals): " << t_h2d_tokens << " ms" << std::endl;
+  std::cout << "    H2D (Data X):      " << t_h2d_X << " ms" << std::endl;
+  std::cout << "    Kernel (Eval):     " << t_kernel_eval << " ms" << std::endl;
+  std::cout << "    Kernel (Reduce):   " << t_kernel_reduce << " ms" << std::endl;
+  std::cout << "    D2H (Results):     " << t_d2h << " ms" << std::endl;
 }
 
 // C-style wrappers

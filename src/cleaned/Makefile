@@ -1,6 +1,6 @@
 NVCC = nvcc
 CXX = g++
-NVCC_FLAGS = -O3 -arch=sm_70 -std=c++14 --compiler-options -Wall
+NVCC_FLAGS = -O3 -arch=sm_89 -std=c++14 --compiler-options -Wall
 CXX_FLAGS = -O3 -std=c++14 -Wall -fopenmp
 
 INCLUDES = -I../utils
