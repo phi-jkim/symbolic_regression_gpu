@@ -1279,7 +1279,13 @@ extern "C" void eval_tree_gpu_async(
 //     return (sp > 0) ? static_stack_pop(stk, sp) : 0.0f;
 // }
 
-__device__ inline float eval_tree_device(const int* tokens, const float* values, const float* d_vars_flat, int len, int num_features) {
+__device__ inline float eval_tree_device(const int* tokens,
+                                         const float* values,
+                                         const float* d_vars_flat,
+                                         int len,
+                                         int num_features,
+                                         int num_dps,
+                                         int dp_idx) {
     float stk[MAX_EVAL_STACK];
     int sp = 0;
     int output = 0; 
@@ -1315,10 +1321,12 @@ __device__ inline float eval_tree_device(const int* tokens, const float* values,
             // tok = values[i];
             // sp++;
         } else if (tok == -1) { // variable
-            // stk[sp++] = x[(int)values[i]];
-            stk[sp++] =d_vars_flat[(int)values[i] * num_dps + dp_idx];
-            // tok = x[(int)values[i]];
-            // sp++;
+            int var_idx = (int)values[i];
+            if (var_idx >= 0 && var_idx <= num_features) {
+                stk[sp++] = d_vars_flat[var_idx * num_dps + dp_idx];
+            } else {
+                stk[sp++] = 0.0f;
+            }
         }
     }
     return stk[--sp];
@@ -1415,7 +1423,13 @@ __global__ void eval_prefix_kernel_multi_expression_batch(
         float *d_pred = d_pred_batch + (expr_idx * num_dps);
         
         // Evaluate expression for this datapoint
-        d_pred[dp_idx] = eval_tree_device(d_tokens, d_values, d_vars_flat, num_tokens, num_vars);
+        d_pred[dp_idx] = eval_tree_device(d_tokens,
+                                          d_values,
+                                          d_vars_flat,
+                                          num_tokens,
+                                          num_vars,
+                                          num_dps,
+                                          dp_idx);
     }
 }
 

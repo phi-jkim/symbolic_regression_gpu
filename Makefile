@@ -609,6 +609,33 @@ TEST_DETECT_SRC = src/test/test_detect_mutations.cpp
 $(TEST_DETECT_BIN): $(TEST_DETECT_SRC) $(UTILS_SRC) $(UTILS_HDR)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -I./src/utils -o $@ $(TEST_DETECT_SRC) $(UTILS_SRC)
+
+# ============================================================================
+# GPU Jinha Evolution Benchmark
+# ============================================================================
+GPU_JINHA_EVOLVE_BIN = $(BUILD_DIR)/gpu_jinha_evolve
+GPU_JINHA_EVOLVE_SRC = src/eval/gpu_simple_jinha.cu
+
+$(GPU_JINHA_EVOLVE_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_JINHA_EVOLVE_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA_MULTI_EXPRESSION_BATCH -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_EVOLVE_SRC) $(UTILS_CU_SRC) src/eval/common_eval.cpp
+
+gpu_jinha_evolve: $(GPU_JINHA_EVOLVE_BIN)
+
+# ============================================================================
+# GPU Baseline Utils Multi-Expression Batch
+# ============================================================================
+GPU_BASELINE_BIN = $(BUILD_DIR)/gpu_baseline_utils_multi_expr
+GPU_BASELINE_SRC = src/eval/gpu_simple_jinha.cu
+
+$(GPU_BASELINE_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_BASELINE_SRC) $(EVALUATOR_HDR)
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA_MULTI_EXPRESSION_BATCH -o $@ \
+		$(MAIN_SRC) $(UTILS_SRC) $(GPU_BASELINE_SRC) $(UTILS_CU_SRC) src/eval/common_eval.cpp
+
+gpu_baseline: $(GPU_BASELINE_BIN)
+
 # ============================================================================
 # Evolution Benchmark Targets
 # ============================================================================
@@ -655,6 +682,11 @@ bench_test20_gpu_custom: $(GPU_CUSTOM_PEREXPR_BIN)
 	@echo ">> GPU Custom Kernel (Per-Expr)"
 	./build/gpu_custom_kernel_perexpression_evolve -evolution 0 19 data/evolution_test20
 
+bench_test20_gpu_baseline: $(GPU_BASELINE_BIN)
+	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Baseline utils multi-expr) ---"
+	@echo ">> GPU Baseline (utils eval_prefix_kernel_multi_expression_batch)"
+	$(GPU_BASELINE_BIN) -evolution 0 19 data/evolution_test20
+
 # Run Benchmarks (Stateful vs Stateless Multi-threaded)
 bench_long: cpu_common cpu_multi_eval
 	@echo "--- Running Long & Large Benchmark (20 gens, 500k dps) ---"
@@ -690,18 +722,6 @@ bench_short_gpu_state: gpu_subtree_state_eval
 	@echo ">> GPU Subtree (Stateful)"
 	./build/gpu_subtree_state_eval 0 4 data/evolution_short_small
 
-# ============================================================================
-# GPU Jinha Evolution Benchmark
-# ============================================================================
-GPU_JINHA_EVOLVE_BIN = $(BUILD_DIR)/gpu_jinha_evolve
-GPU_JINHA_EVOLVE_SRC = src/eval/gpu_simple_jinha.cu
-
-$(GPU_JINHA_EVOLVE_BIN): $(MAIN_SRC) $(UTILS_SRC) $(UTILS_HDR) $(UTILS_CU_SRC) $(GPU_JINHA_EVOLVE_SRC) $(EVALUATOR_HDR)
-	@mkdir -p $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) -DUSE_GPU_JINHA_MULTI_EXPRESSION_BATCH -o $@ \
-		$(MAIN_SRC) $(UTILS_SRC) $(GPU_JINHA_EVOLVE_SRC) $(UTILS_CU_SRC) src/eval/common_eval.cpp
-
-gpu_jinha_evolve: $(GPU_JINHA_EVOLVE_BIN)
 
 bench_short_gpu_jinha: $(GPU_JINHA_EVOLVE_BIN)
 	@echo "--- Running Short & Small Benchmark (5 gens, 100k dps) on GPU (Jinha) ---"
