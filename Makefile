@@ -640,10 +640,10 @@ bench_test20_gpu_state: gpu_subtree_state_eval
 	@echo ">> GPU Subtree (Stateful)"
 	./build/gpu_subtree_state_eval 0 19 data/evolution_test20
 
-bench_test20_gpu_baseline: gpu_simple_jinha
-	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Baseline eval_tree_device) ---"
-	@echo ">> GPU Jinha Baseline (Multi-Expr Batch)"
-	./build/gpu_simple_jinha -evolution 0 19 data/evolution_test20
+bench_test20_gpu_simple_original: $(GPU_EVAL_BIN)
+	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Original Simple) ---"
+	@echo ">> GPU Simple (Original)"
+	./build/gpu_eval -evolution 0 19 data/evolution_test20
 
 # Run Benchmarks (Stateful vs Stateless Multi-threaded)
 bench_long: cpu_common cpu_multi_eval
