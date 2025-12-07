@@ -124,6 +124,7 @@ __global__ void eval_subtrees_kernel(
 // and do a second reduction kernel (or Thrust reduction if available, but let's stick to raw CUDA).
 // Actually, let's write the squared error to d_preds (reused as d_sq_errors) and then reduce.
 
+// Kernel 2: Evaluate skeletons AND compute squared error
 __global__ void eval_skeletons_kernel(
     const int *d_tokens,
     const float *d_values,
@@ -185,10 +186,6 @@ __global__ void eval_skeletons_kernel(
 
     float pred = stk[0];
     float diff = pred - y_true;
-    // Handle NAN/INF: if invalid, set error to 0 (or handle gracefully)
-    // For now, let's just let it propagate or clamp?
-    // If we want to ignore invalid dps, we need a count.
-    // Let's assume valid for now for perf, or use 0 if nan.
     if (isnan(pred) || isinf(pred)) {
         d_sq_errors[expr_idx * total_dps + dp_idx] = NAN; 
     } else {
@@ -384,6 +381,10 @@ void evaluate_gpu_mse(
     }
   }
   mark_cached_subtrees_from_state(input_info, ctx, result);
+
+  // Debug output
+  // std::cout << "  [GPU Opt State] Cached: " << ctx.num_cached << "/" << ctx.capacity 
+  //           << ", New this gen: " << new_subtree_indices.size() << std::endl;
 
   // 3. Prepare GPU buffers for new subtrees
   int num_new = (int)new_subtree_indices.size();

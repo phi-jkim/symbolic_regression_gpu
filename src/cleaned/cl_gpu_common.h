@@ -10,7 +10,7 @@
 #define MAX_NUM_FEATURES 32
 #endif
 
-#define MAX_CACHED_SUBTREES 10000
+#define MAX_CACHED_SUBTREES 2048
 
 #define CUDA_CHECK(call)                                                       \
   do {                                                                         \

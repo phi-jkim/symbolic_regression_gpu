@@ -82,6 +82,30 @@ struct SubtreeCandidate {
     uint64_t hash;
 };
 
+// Merkle-style hash combination
+static uint64_t combine_hashes(uint64_t h1, uint64_t h2) {
+    // Boost-like hash combine
+    return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+}
+
+static uint64_t hash_node(int token, double value, const std::vector<uint64_t>& child_hashes) {
+    uint64_t h = 14695981039346656037ULL;
+    const uint64_t prime = 1099511628211ULL;
+    
+    h ^= (uint64_t)token;
+    h *= prime;
+    
+    uint64_t val_bits;
+    memcpy(&val_bits, &value, sizeof(uint64_t));
+    h ^= val_bits;
+    h *= prime;
+    
+    for (uint64_t ch : child_hashes) {
+        h = combine_hashes(h, ch);
+    }
+    return h;
+}
+
 SubtreeDetectionResult detect_common_subtrees(
     int num_exprs,
     int num_vars,
@@ -96,7 +120,7 @@ SubtreeDetectionResult detect_common_subtrees(
     SubtreeDetectionResult result;
     result.num_exprs = num_exprs;
     
-    // Allocate and initialize expr_sub_hints (same shape as tokens)
+    // Allocate and initialize expr_sub_hints
     result.expr_sub_hints = new int*[num_exprs];
     for (int expr_id = 0; expr_id < num_exprs; expr_id++) {
         result.expr_sub_hints[expr_id] = new int[num_tokens[expr_id]];
@@ -105,85 +129,103 @@ SubtreeDetectionResult detect_common_subtrees(
         }
     }
     
-    // Step 1: Extract all subtrees and hash them
+    // Step 1: Linear pass to compute sizes and hashes
     // map: hash -> vector of candidates
     std::map<uint64_t, std::vector<SubtreeCandidate>> hash_map;
     
+    // Pre-allocate vectors for per-expression info to avoid repeated allocs
+    std::vector<int> sizes;
+    std::vector<uint64_t> hashes;
+    
     for (int expr_id = 0; expr_id < num_exprs; expr_id++) {
-        for (int start_idx = 0; start_idx < num_tokens[expr_id]; start_idx++) {
-            // Compute subtree size
-            int subtree_size = compute_subtree_size(tokens[expr_id], start_idx, num_tokens[expr_id]);
+        int len = num_tokens[expr_id];
+        const int* toks = tokens[expr_id];
+        const double* vals = values[expr_id];
+        
+        sizes.resize(len);
+        hashes.resize(len);
+        
+        // Reverse pass
+        for (int i = len - 1; i >= 0; i--) {
+            int token = toks[i];
+            if (token <= 0) {
+                // Terminal
+                sizes[i] = 1;
+                hashes[i] = hash_node(token, vals[i], {});
+            } else {
+                // Operator
+                int arity = simple_op_arity(token);
+                int size = 1;
+                std::vector<uint64_t> child_hashes;
+                int pos = i + 1;
+                
+                for (int k = 0; k < arity; k++) {
+                    if (pos >= len) break; // Should not happen for valid prefix
+                    size += sizes[pos];
+                    child_hashes.push_back(hashes[pos]);
+                    pos += sizes[pos];
+                }
+                sizes[i] = size;
+                hashes[i] = hash_node(token, vals[i], child_hashes);
+            }
             
-            // Skip singletons and subtrees smaller than minimum
-            if (subtree_size < 2 || subtree_size < min_subtree_size) continue;
-            
-            // Compute hash
-            uint64_t hash = compute_hash(
-                tokens[expr_id] + start_idx,
-                values[expr_id] + start_idx,
-                subtree_size
-            );
-            
-            // Add to hash map
-            SubtreeCandidate cand;
-            cand.expr_id = expr_id;
-            cand.start_idx = start_idx;
-            cand.size = subtree_size;
-            hash_map[hash].push_back(cand);
+            // Collect candidate
+            if (sizes[i] >= min_subtree_size) {
+                SubtreeCandidate cand;
+                cand.expr_id = expr_id;
+                cand.start_idx = i;
+                cand.size = sizes[i];
+                cand.hash = hashes[i];
+                hash_map[cand.hash].push_back(cand);
+            }
         }
     }
     
-    // Step 2: Sort hashes by occurrence count (most frequent first)
-    std::vector<std::pair<uint64_t, std::vector<SubtreeCandidate>>> sorted_buckets;
-    for (auto& kv : hash_map) {
-        if ((int)kv.second.size() >= min_frequency) {
-            sorted_buckets.push_back(kv);
-        }
-    }
-    std::sort(sorted_buckets.begin(), sorted_buckets.end(),
-              [](const std::pair<uint64_t, std::vector<SubtreeCandidate>>& a,
-                 const std::pair<uint64_t, std::vector<SubtreeCandidate>>& b) {
-                  return a.second.size() > b.second.size();  // Most frequent first
-              });
-    
-    // Step 3: Verify matches and assign subtree IDs
+    // Step 2: Filter and Verify
     std::vector<std::vector<SubtreeCandidate>> verified_subtrees;
     
-    for (auto& bucket : sorted_buckets) {
-        std::vector<SubtreeCandidate>& candidates = bucket.second;
+    for (auto& kv : hash_map) {
+        if ((int)kv.second.size() < min_frequency) continue;
         
-        // Verify all candidates actually match (compare to first candidate)
-        std::vector<SubtreeCandidate> verified;
+        std::vector<SubtreeCandidate>& candidates = kv.second;
+        
+        // Verify against first candidate (to handle hash collisions)
+        // Note: Merkle hash is strong, but we still verify token sequence match
+        // which is O(Size).
         
         const SubtreeCandidate& ref = candidates[0];
         const int* ref_tokens = tokens[ref.expr_id] + ref.start_idx;
         const double* ref_values = values[ref.expr_id] + ref.start_idx;
         
-        for (const auto& cand : candidates) {
-            // Skip if this position is already part of a larger common subtree
-            if (result.expr_sub_hints[cand.expr_id][cand.start_idx] != -1) {
-                continue;
-            }
+        std::vector<SubtreeCandidate> verified;
+        verified.push_back(ref);
+        
+        for (size_t k = 1; k < candidates.size(); k++) {
+            const auto& cand = candidates[k];
+            // Quick size check (should match if hash matches, but good sanity)
+            if (cand.size != ref.size) continue;
             
-            // Verify match
             const int* cand_tokens = tokens[cand.expr_id] + cand.start_idx;
             const double* cand_values = values[cand.expr_id] + cand.start_idx;
             
             if (subtrees_match(ref_tokens, ref_values, cand_tokens, cand_values, cand.size)) {
                 verified.push_back(cand);
             }
-            else {
-                std::cout << "Mismatch at expr " << cand.expr_id << " idx " << cand.start_idx << std::endl;
-            }
         }
         
-        // Only keep if we still have enough occurrences
         if ((int)verified.size() >= min_frequency) {
             verified_subtrees.push_back(verified);
         }
     }
     
-    // Step 4: Build result structure
+    // Step 3: Sort by size descending
+    std::sort(verified_subtrees.begin(), verified_subtrees.end(),
+              [](const std::vector<SubtreeCandidate>& a,
+                 const std::vector<SubtreeCandidate>& b) {
+                  return a[0].size > b[0].size;
+              });
+    
+    // Step 4: Build result
     result.num_subs = verified_subtrees.size();
     
     if (result.num_subs > 0) {
@@ -217,13 +259,22 @@ SubtreeDetectionResult detect_common_subtrees(
                 result.sub_occ_expr[sub_id][occ] = verified[occ].expr_id;
                 result.sub_occ_idx[sub_id][occ] = verified[occ].start_idx;
                 
-                // Mark root of subtree with its ID
-                result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx] = sub_id;
+                // Check overlap
+                bool overlap = false;
+                for (int k = 0; k < ref.size; k++) {
+                    if (result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx + k] != -1) {
+                        overlap = true;
+                        break;
+                    }
+                }
                 
-                // Mark all positions in this subtree to skip deeper subtrees
-                // We use -2 as a special marker for "inside a common subtree" (SKIP)
-                for (int i = 1; i < verified[occ].size; i++) {
-                    result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx + i] = -2;
+                if (!overlap) {
+                    // Mark root
+                    result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx] = sub_id;
+                    // Mark body
+                    for (int k = 1; k < ref.size; k++) {
+                        result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx + k] = -2;
+                    }
                 }
             }
         }
