@@ -21,6 +21,11 @@ void* create_gpu_simple_context();
 void destroy_gpu_simple_context(void* ctx);
 void evaluate_gpu_simple_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, RunStats& stats);
 
+// PTX GPU eval wrappers
+void* create_gpu_ptx_context();
+void destroy_gpu_ptx_context(void* ctx);
+void evaluate_gpu_ptx_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, RunStats& stats);
+
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -78,6 +83,7 @@ int main(int argc, char** argv) {
 
     void* gpu_ctx = create_gpu_context();
     void* gpu_simple_ctx = create_gpu_simple_context();
+    void* gpu_ptx_ctx = create_gpu_ptx_context();
 
     // Stats Helper
     struct GenStats {
@@ -140,6 +146,15 @@ int main(int argc, char** argv) {
         
         std::cout << "Gen " << gen << " Simple: " << ms_simple << " ms" << std::endl;
 
+        // --- PHASE 2: GPU PTX Benchmark ---
+        std::vector<float> gpu_ptx_mses;
+        TimePoint t1_ptx = measure_clock();
+        RunStats dummy_stats_ptx;
+        evaluate_gpu_ptx_wrapper(info, all_vars, gpu_ptx_mses, gpu_ptx_ctx, upload_X, dummy_stats_ptx);
+        double ms_ptx = clock_to_ms(t1_ptx, measure_clock());
+        
+        std::cout << "Gen " << gen << " PTX: " << ms_ptx << " ms" << std::endl;
+
         delete[] all_vars;
         free_input_info(info);
     }
@@ -201,6 +216,7 @@ int main(int argc, char** argv) {
 
     destroy_gpu_context(gpu_ctx);
     destroy_gpu_simple_context(gpu_simple_ctx);
+    destroy_gpu_ptx_context(gpu_ptx_ctx);
     
     // Free float data
     for (int v = 0; v <= num_vars; v++) {

@@ -124,11 +124,11 @@ void evaluate_cpu_mse(InputInfo& input_info, float*** all_vars, std::vector<floa
                 float** vars = all_vars[i]; // vars[v][dp]
                 
                 // Optimization: Pre-extract pointers
-                std::vector<float*> var_ptrs(num_vars);
-                for(int v=0; v<num_vars; v++) var_ptrs[v] = vars[v];
+                std::vector<float*> var_ptrs(num_vars + 1);
+                for(int v=0; v<=num_vars; v++) var_ptrs[v] = vars[v];
                 
                 // Get Y (last var)
-                float* y_true = var_ptrs[num_vars]; // num_vars is features? 
+                float* y_true = var_ptrs[num_vars]; 
                 // Wait, all_vars has size num_vars+1 (last is Y)
                 
                 double total_sq_err = 0.0;

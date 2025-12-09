@@ -105,6 +105,7 @@ struct RunStats {
     double drift_detect_time_ms = 0.0; // CPU Detect
     double data_transfer_time_ms = 0.0; // H2D + D2H
     double gpu_kernel_time_ms = 0.0;
+    double jit_compile_time_ms = 0.0;
     
     // Detection Stats
     int num_subtrees = 0;

@@ -5,24 +5,24 @@
 #include <cstring>
 #include <cmath>
 #include <fstream>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
 #include "../utils/utils.h"
 
 // Evaluator signatures
-#ifdef USE_GPU_SUBTREE
+// function prototypes
+void evaluate_cpu_mse(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, RunStats& stats);
+void evaluate_gpu_mse_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, bool clear_cache, RunStats& stats);
+void evaluate_gpu_simple_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, RunStats& stats);
+void evaluate_gpu_ptx_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, RunStats& stats);
+
 void* create_gpu_context();
 void destroy_gpu_context(void* ctx);
-void evaluate_gpu_mse_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, bool clear_cache, RunStats& stats);
-#endif
-
-#ifdef USE_GPU_SIMPLE
 void* create_gpu_simple_context();
 void destroy_gpu_simple_context(void* ctx);
-void evaluate_gpu_simple_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, RunStats& stats);
-#endif
-
-#ifdef USE_CPU
-void evaluate_cpu_mse(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, RunStats& stats);
-#endif
+void* create_gpu_ptx_context();
+void destroy_gpu_ptx_context(void* ctx);
 
 struct Individual {
     std::vector<int> tokens;
@@ -33,27 +33,37 @@ struct Individual {
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] << " <pop_size> <gens> [data_dir]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <pop_size> <gens> [data_dir] [limit_dps]" << std::endl;
         return 1;
     }
 
     int pop_size = std::atoi(argv[1]);
     int gens = std::atoi(argv[2]);
     std::string data_dir = (argc >= 4) ? argv[3] : "../../data/evolution_test20";
+    int limit_dps = (argc >= 5) ? std::atoi(argv[4]) : 500000;
     
     std::string eval_name = "Unknown";
+    void* eval_ctx = nullptr; // Initialize to nullptr
+    (void)eval_ctx; // Silence unused warning for CPU build
     #ifdef USE_GPU_SUBTREE
     eval_name = "GPU Optimized (Subtree)";
+    eval_ctx = create_gpu_context();
     #elif defined(USE_GPU_SIMPLE)
     eval_name = "GPU Simple";
+    eval_ctx = create_gpu_simple_context();
+    #elif defined(USE_GPU_PTX)
+    eval_name = "GPU PTX";
+    eval_ctx = create_gpu_ptx_context();
     #elif defined(USE_CPU)
     eval_name = "CPU";
     #else
-    #error "Must define USE_GPU_SUBTREE, USE_GPU_SIMPLE, or USE_CPU"
+    #error "Must define USE_GPU_SUBTREE, USE_GPU_SIMPLE, USE_GPU_PTX, or USE_CPU"
     #endif
 
     std::cout << "Starting Minimal SR System (" << eval_name << ")" << std::endl;
     std::cout << "Population: " << pop_size << ", Gens: " << gens << std::endl;
     std::cout << "Data Dir: " << data_dir << std::endl;
+    if (limit_dps > 0) std::cout << "Limit DPS: " << limit_dps << std::endl;
 
     // Load Data
     std::string shared_data_path = data_dir + "/shared_data.txt";
@@ -64,15 +74,22 @@ int main(int argc, char** argv) {
         return 1;
     }
     int num_vars = info_0.num_vars[0]; // Input vars
-    int num_dps = info_0.num_dps[0];
+    int file_dps = info_0.num_dps[0];
     free_input_info(info_0);
 
+    // Determine actual DPS to use
+    int num_dps = file_dps;
+    if (limit_dps > 0 && limit_dps < file_dps) {
+        num_dps = limit_dps;
+    }
+
     // Load shared data (double) and convert to float
-    double** shared_data_double = load_data_file(shared_data_path, num_vars, num_dps);
+    // Note: load_data_file currently loads ALL data. We will just copy the first num_dps.
+    double** shared_data_double = load_data_file(shared_data_path, num_vars, file_dps); 
     float** shared_data_float = new float*[num_vars + 1];
     for(int i=0; i<=num_vars; i++) {
         shared_data_float[i] = new float[num_dps];
-        for(int j=0; j<num_dps; j++) {
+        for(int j=0; j<num_dps; j++) { // Only copy up to num_dps
             shared_data_float[i][j] = (float)shared_data_double[i][j];
         }
     }
@@ -95,17 +112,25 @@ int main(int argc, char** argv) {
     if (!safe_eval_name.empty() && safe_eval_name.front() == '_') safe_eval_name.erase(0, 1);
     if (!safe_eval_name.empty() && safe_eval_name.back() == '_') safe_eval_name.pop_back();
 
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+    std::tm* now_tm = std::localtime(&now_c);
+    
+    char timestamp[32];
+    std::strftime(timestamp, sizeof(timestamp), "%m%d-%H%M%S", now_tm);
+
     std::string csv_filename = "../../data/output/sr_results/sr_results_" + safe_eval_name + 
                                "_gen" + std::to_string(gens) + 
                                "_pop" + std::to_string(pop_size) + 
-                               "_dps" + std::to_string(num_dps) + ".csv";
+                               "_dps" + std::to_string(num_dps) + 
+                               "_" + std::string(timestamp) + ".csv";
     
     std::ofstream csv_file(csv_filename);
     if (!csv_file.is_open()) {
         std::cerr << "Failed to open CSV file: " << csv_filename << std::endl;
     } else {
         // CSV Header
-        csv_file << "Gen,BestMSE,MedianMSE,TotalTimeMs,DetectTimeMs,H2D_D2H_TimeMs,KernelTimeMs,NumSubtrees,AvgSubtreeSize,Coverage\n";
+        csv_file << "Gen,BestMSE,MedianMSE,TotalTimeMs,DetectTimeMs,H2D_D2H_TimeMs,JITTimeMs,KernelTimeMs,NumSubtrees,AvgSubtreeSize,Coverage\n";
     }
 
     // Initialize Population
@@ -120,13 +145,8 @@ int main(int argc, char** argv) {
     }
 
     // Init Evaluator
-    void* eval_ctx = nullptr;
-    (void)eval_ctx; // Suppress unused warning for CPU build
-    #ifdef USE_GPU_SUBTREE
-    eval_ctx = create_gpu_context();
-    #elif defined(USE_GPU_SIMPLE)
-    eval_ctx = create_gpu_simple_context();
-    #endif
+    // eval_ctx is already initialized at the beginning of main
+
 
     // Main Loop
     std::vector<float> mses(pop_size);
@@ -175,6 +195,8 @@ int main(int argc, char** argv) {
         evaluate_gpu_mse_wrapper(batch_info, all_vars_ptr, mses, eval_ctx, (gen==0), false, stats);
         #elif defined(USE_GPU_SIMPLE)
         evaluate_gpu_simple_wrapper(batch_info, all_vars_ptr, mses, eval_ctx, (gen==0), stats);
+        #elif defined(USE_GPU_PTX)
+        evaluate_gpu_ptx_wrapper(batch_info, all_vars_ptr, mses, eval_ctx, (gen==0), stats);
         #elif defined(USE_CPU)
         evaluate_cpu_mse(batch_info, all_vars_ptr, mses, stats);
         #endif
@@ -232,6 +254,7 @@ int main(int argc, char** argv) {
                      << stats.total_eval_time_ms << ","
                      << stats.drift_detect_time_ms << ","
                      << stats.data_transfer_time_ms << ","
+                     << stats.jit_compile_time_ms << "," // New field
                      << stats.gpu_kernel_time_ms << ","
                      << stats.num_subtrees << ","
                      << stats.avg_subtree_size << ","
@@ -293,6 +316,8 @@ int main(int argc, char** argv) {
     destroy_gpu_context(eval_ctx);
     #elif defined(USE_GPU_SIMPLE)
     destroy_gpu_simple_context(eval_ctx);
+    #elif defined(USE_GPU_PTX)
+    destroy_gpu_ptx_context(eval_ctx);
     #endif
     
     // Free shared data
