@@ -953,6 +953,16 @@ namespace
         return rng;
     }
 
+} // namespace
+
+void set_seed(int seed)
+{
+    global_rng().seed(seed);
+    std::srand(seed);
+}
+
+namespace {
+
     float rand_uniform(float lo, float hi)
     {
         std::uniform_real_distribution<float> dist(lo, hi);

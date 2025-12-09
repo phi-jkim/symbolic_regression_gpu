@@ -370,7 +370,7 @@ void evaluate_gpu_mse(
   TimePoint t1 = measure_clock();
   SubtreeDetectionResult result = detect_common_subtrees(
       num_exprs, num_vars, input_info.num_tokens,
-      (const int **)input_info.tokens, (const double **)input_info.values, 7, 10);
+      (const int **)input_info.tokens, (const double **)input_info.values, 3, 10);
   t_cpu_detect = (float)clock_to_ms(t1, measure_clock());
   // Fill Detection Stats
   stats.drift_detect_time_ms = t_cpu_detect;

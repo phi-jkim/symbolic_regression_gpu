@@ -16,6 +16,7 @@ void evaluate_cpu_mse(InputInfo& input_info, float*** all_vars, std::vector<floa
 void evaluate_gpu_mse_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, bool clear_cache, RunStats& stats);
 void evaluate_gpu_simple_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, RunStats& stats);
 void evaluate_gpu_ptx_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, RunStats& stats);
+void evaluate_gpu_nvrtc_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, RunStats& stats);
 
 void* create_gpu_context();
 void destroy_gpu_context(void* ctx);
@@ -23,6 +24,8 @@ void* create_gpu_simple_context();
 void destroy_gpu_simple_context(void* ctx);
 void* create_gpu_ptx_context();
 void destroy_gpu_ptx_context(void* ctx);
+void* create_gpu_nvrtc_context();
+void destroy_gpu_nvrtc_context(void* ctx);
 
 struct Individual {
     std::vector<int> tokens;
@@ -41,6 +44,10 @@ int main(int argc, char** argv) {
     int gens = std::atoi(argv[2]);
     std::string data_dir = (argc >= 4) ? argv[3] : "../../data/evolution_test20";
     int limit_dps = (argc >= 5) ? std::atoi(argv[4]) : 500000;
+    int seed = (argc >= 6) ? std::atoi(argv[5]) : time(NULL);
+    
+    // Set seed immediately
+    set_seed(seed);
     
     std::string eval_name = "Unknown";
     void* eval_ctx = nullptr; // Initialize to nullptr
@@ -54,15 +61,19 @@ int main(int argc, char** argv) {
     #elif defined(USE_GPU_PTX)
     eval_name = "GPU PTX";
     eval_ctx = create_gpu_ptx_context();
+    #elif defined(USE_GPU_NVRTC)
+    eval_name = "GPU NVRTC";
+    eval_ctx = create_gpu_nvrtc_context();
     #elif defined(USE_CPU)
     eval_name = "CPU";
     #else
-    #error "Must define USE_GPU_SUBTREE, USE_GPU_SIMPLE, USE_GPU_PTX, or USE_CPU"
+    #error "Must define USE_GPU_SUBTREE, USE_GPU_SIMPLE, USE_GPU_PTX, USE_GPU_NVRTC, or USE_CPU"
     #endif
 
     std::cout << "Starting Minimal SR System (" << eval_name << ")" << std::endl;
     std::cout << "Population: " << pop_size << ", Gens: " << gens << std::endl;
     std::cout << "Data Dir: " << data_dir << std::endl;
+    std::cout << "Seed: " << seed << std::endl;
     if (limit_dps > 0) std::cout << "Limit DPS: " << limit_dps << std::endl;
 
     // Load Data
@@ -130,8 +141,9 @@ int main(int argc, char** argv) {
         std::cerr << "Failed to open CSV file: " << csv_filename << std::endl;
     } else {
         // CSV Header
-        csv_file << "Gen,BestMSE,MedianMSE,TotalTimeMs,DetectTimeMs,H2D_D2H_TimeMs,JITTimeMs,KernelTimeMs,NumSubtrees,AvgSubtreeSize,Coverage\n";
+        csv_file << "Gen,BestMSE,MedianMSE,TotalTokens,CoveredTokens,TotalTimeMs,DetectTimeMs,H2D_D2H_TimeMs,JITTimeMs,KernelTimeMs,NumSubtrees,AvgSubtreeSize,Coverage\n";
     }
+
 
     // Initialize Population
     std::vector<Individual> population(pop_size);
@@ -197,6 +209,8 @@ int main(int argc, char** argv) {
         evaluate_gpu_simple_wrapper(batch_info, all_vars_ptr, mses, eval_ctx, (gen==0), stats);
         #elif defined(USE_GPU_PTX)
         evaluate_gpu_ptx_wrapper(batch_info, all_vars_ptr, mses, eval_ctx, (gen==0), stats);
+        #elif defined(USE_GPU_NVRTC)
+        evaluate_gpu_nvrtc_wrapper(batch_info, all_vars_ptr, mses, eval_ctx, (gen==0), stats);
         #elif defined(USE_CPU)
         evaluate_cpu_mse(batch_info, all_vars_ptr, mses, stats);
         #endif
@@ -216,11 +230,14 @@ int main(int argc, char** argv) {
         std::vector<float> sorted_mses;
         sorted_mses.reserve(pop_size);
         int best_ind_idx = -1;
+        double total_tokens = 0;
 
         for(int i=0; i<pop_size; i++) {
             // Assign fitness to individual
             population[i].fitness = mses[i];
             
+            total_tokens += population[i].tokens.size();
+
             if (!std::isnan(mses[i]) && !std::isinf(mses[i])) {
                 if(mses[i] < best_mse) {
                     best_mse = mses[i];
@@ -229,6 +246,7 @@ int main(int argc, char** argv) {
                 sorted_mses.push_back(mses[i]);
             }
         }
+        double covered_tokens = total_tokens * stats.coverage;
         
         float median_mse = 0;
         if (!sorted_mses.empty()) {
@@ -251,10 +269,12 @@ int main(int argc, char** argv) {
             csv_file << gen << "," 
                      << best_mse << "," 
                      << median_mse << "," 
+                     << total_tokens << ","
+                     << covered_tokens << ","
                      << stats.total_eval_time_ms << ","
                      << stats.drift_detect_time_ms << ","
                      << stats.data_transfer_time_ms << ","
-                     << stats.jit_compile_time_ms << "," // New field
+                     << stats.jit_compile_time_ms << ","
                      << stats.gpu_kernel_time_ms << ","
                      << stats.num_subtrees << ","
                      << stats.avg_subtree_size << ","
@@ -318,6 +338,8 @@ int main(int argc, char** argv) {
     destroy_gpu_simple_context(eval_ctx);
     #elif defined(USE_GPU_PTX)
     destroy_gpu_ptx_context(eval_ctx);
+    #elif defined(USE_GPU_NVRTC)
+    destroy_gpu_nvrtc_context(eval_ctx);
     #endif
     
     // Free shared data

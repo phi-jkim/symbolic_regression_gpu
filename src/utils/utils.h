@@ -186,6 +186,12 @@ struct EvolutionParams {
     float prob_unary = 0.35f;    // probability of picking a unary op vs binary
 };
 
+// Helper to get monotonic time in seconds
+double get_time_sec();
+
+// Set random seed
+void set_seed(int seed);
+
 // Generate a random prefix expression within the provided constraints.
 void generate_random_expression(const EvolutionParams& params,
                                 std::vector<int>& tokens_out,
