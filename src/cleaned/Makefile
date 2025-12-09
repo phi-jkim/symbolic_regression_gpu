@@ -136,7 +136,7 @@ run_sr_task_gen_pop100_cpu:
 	done
 
 run_sr_task_gen_pop2000_cpu:
-	@for i in 1 2 3 4 5; do \
+	@for i in 1 2 3; do \
 		seed=$$RANDOM; \
 		echo "Run $$i/5: CPU Simple (Seed $$seed)"; \
 		$(MAKE) run_sr_cpu POP=2000 THREADS=96 SEED=$$seed; \
@@ -148,26 +148,26 @@ run_sr_task_gen_pop2000_cpu:
 # Pops: 50, 100, 200, 400, 800, 1600, then +800 up to 8000
 # Runs: 3 times each
 run_sr_task_scale_pop_gpu:
-	@for pop in 50 100 200 400; do \
+	@for pop in 50 100 200; do \
 		echo "Scale Pop Test: POP=$$pop"; \
 		for i in 1 2 3 4 5; do \
 			seed=$$RANDOM; \
 			echo "  Run $$i/5: GPU Optimized (Pop $$pop, Seed $$seed)"; \
-			$(MAKE) run_sr_opt POP=$$pop GENS=50 SEED=$$seed; \
+			$(MAKE) run_sr_opt POP=$$pop GENS=30 SEED=$$seed; \
 			echo "  Run $$i/5: GPU Simple (Pop $$pop, Seed $$seed)"; \
-			$(MAKE) run_sr_simple POP=$$pop GENS=50 SEED=$$seed; \
+			$(MAKE) run_sr_simple POP=$$pop GENS=30 SEED=$$seed; \
 			echo "  Run $$i/5: GPU PTX (Pop $$pop, Seed $$seed)"; \
-			$(MAKE) run_sr_ptx POP=$$pop GENS=50 SEED=$$seed; \
+			$(MAKE) run_sr_ptx POP=$$pop GENS=30 SEED=$$seed; \
 		done; \
 	done
-	@for pop in 800 1600 2400 3200 4800 6400 8000; do \
+	@for pop in 400 800 1600 2400 3200 4800 6400 8000; do \
 		echo "Scale Pop Test: POP=$$pop"; \
 		for i in 1 2 3 4 5; do \
 			seed=$$RANDOM; \
 			echo "  Run $$i/5: GPU Optimized (Pop $$pop, Seed $$seed)"; \
-			$(MAKE) run_sr_opt POP=$$pop GENS=50 SEED=$$seed; \
+			$(MAKE) run_sr_opt POP=$$pop GENS=30 SEED=$$seed; \
 			echo "  Run $$i/5: GPU Simple (Pop $$pop, Seed $$seed)"; \
-			$(MAKE) run_sr_simple POP=$$pop GENS=50 SEED=$$seed; \
+			$(MAKE) run_sr_simple POP=$$pop GENS=30 SEED=$$seed; \
 		done; \
 	done
 
@@ -177,7 +177,7 @@ run_sr_task_scale_pop_cpu:
 		for i in 1 2 3 4 5; do \
 			seed=$$RANDOM; \
 			echo "  Run $$i/5: CPU Simple (Pop $$pop, Seed $$seed)"; \
-			$(MAKE) run_sr_cpu POP=2000 GENS=50 THREADS=96 SEED=$$seed; \
+			$(MAKE) run_sr_cpu POP=$$pop GENS=50 THREADS=96 SEED=$$seed; \
 		done; \
 	done
 
@@ -187,7 +187,7 @@ run_sr_task_scale_pop_cpu:
 # Runs: 3 times each
 # Fixed Pop=2000, Gens=100
 run_sr_task_scale_dps_gpu:
-	@for dps in 10000 20000 40000 80000 160000 320000 480000 640000 800000 1000000; do \
+	@for dps in 40000 80000 160000 320000 480000 640000 800000 1000000; do \
 		echo "Scale DPS Test: DPS=$$dps"; \
 		for i in 1 2 3 4 5; do \
 			seed=$$RANDOM; \
@@ -206,3 +206,13 @@ gen_data_test20_1M:
 
 clean:
 	rm -f $(OBJS) $(BUILD_DIR)/cl_bench $(BUILD_DIR)/cl_sr_*
+
+# Plotting Targets
+plots:
+	python3 ../utils/plot_results.py --dir ../../data/output/sr_results/plot-A1
+	python3 ../utils/plot_results.py --dir ../../data/output/sr_results/plot-A2 --filter GPU
+	python3 ../utils/plot_results_pop.py --dir ../../data/output/sr_results/plot-B --filter GPU
+	python3 ../utils/plot_results_dps.py --dir ../../data/output/sr_results/plot-C
+	python3 ../utils/plot_results_kernel.py --dir ../../data/output/sr_results/plot-A1 --filter GPU
+	python3 ../utils/plot_results_breakdown.py --dir ../../data/output/sr_results/plot-A1
+	python3 ../utils/plot_results_breakdown_pop.py --dir ../../data/output/sr_results/plot-B --filter GPU
