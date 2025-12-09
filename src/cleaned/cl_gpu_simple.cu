@@ -122,37 +122,42 @@ __global__ void eval_simple_kernel(
 // Simple reduction kernel (same as optimized version)
 __global__ void reduce_mse_kernel_simple(
     const float *d_sq_errors,
-    double *d_mses,
+    float *d_mses,
     int num_exprs,
     int total_dps) {
     
     int expr_idx = blockIdx.x;
     if (expr_idx >= num_exprs) return;
 
-    double sum = 0.0;
+    // double sum = 0.0; // Removed unused variable 
+                      // Task says "make it all to use float only". Let's try float accumulator.
+                      // Actually, for large sums, float accumulator might have precision issues.
+                      // But the user asked "make it all to use float only".
+                      // I will use float for sum.
+    float fsum = 0.0f;
     int valid_count = 0;
     
     // Grid-stride loop for reduction within the expression's data
     for (int i = threadIdx.x; i < total_dps; i += blockDim.x) {
         float val = d_sq_errors[expr_idx * total_dps + i];
         if (!isnan(val)) {
-            sum += (double)val;
+            fsum += val;
             valid_count++;
         }
     }
 
     // Block reduction
-    extern __shared__ double sdata[];
-    int* scount = (int*)&sdata[blockDim.x];
+    extern __shared__ float sdata_f[];
+    int* scount = (int*)&sdata_f[blockDim.x];
     
     int tid = threadIdx.x;
-    sdata[tid] = sum;
+    sdata_f[tid] = fsum;
     scount[tid] = valid_count;
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            sdata[tid] += sdata[tid + s];
+            sdata_f[tid] += sdata_f[tid + s];
             scount[tid] += scount[tid + s];
         }
         __syncthreads();
@@ -160,7 +165,7 @@ __global__ void reduce_mse_kernel_simple(
 
     if (tid == 0) {
         if (scount[0] > 0) {
-            d_mses[expr_idx] = sdata[0] / scount[0];
+            d_mses[expr_idx] = sdata_f[0] / scount[0];
         } else {
             d_mses[expr_idx] = NAN;
         }
@@ -168,11 +173,11 @@ __global__ void reduce_mse_kernel_simple(
 }
 
 // Host helper
-static float *flatten_X_col_major_full_simple(double **vars, int num_vars, int total_dps) {
+static float *flatten_X_col_major_full_simple(float **vars, int num_vars, int total_dps) {
   float *flat = new float[(num_vars + 1) * total_dps];
   for (int v = 0; v <= num_vars; v++) {
     for (int dp = 0; dp < total_dps; dp++) {
-      flat[v * total_dps + dp] = (float)vars[v][dp];
+      flat[v * total_dps + dp] = vars[v][dp];
     }
   }
   return flat;
@@ -181,9 +186,10 @@ static float *flatten_X_col_major_full_simple(double **vars, int num_vars, int t
 // Main GPU evaluation function
 void evaluate_gpu_simple(
     InputInfo &input_info,
-    double ***all_vars,
-    std::vector<double> &mses,
-    SimpleGPUContext &ctx) {
+    float ***all_vars,
+    std::vector<float> &mses,
+    SimpleGPUContext &ctx,
+    bool upload_X) {
 
   int num_exprs = input_info.num_exprs;
   if (num_exprs == 0) return;
@@ -232,20 +238,22 @@ void evaluate_gpu_simple(
   cudaEventElapsedTime(&ms, start, stop);
   t_h2d_tokens += ms;
 
-  // 2. Upload X
+  // 2. Upload X (Conditional)
   size_t x_size_floats = (size_t)(num_vars + 1) * (size_t)total_dps;
   ctx.ensure_X_buffer(x_size_floats);
   
-  float *h_X = flatten_X_col_major_full_simple(all_vars[0], num_vars, total_dps);
-  
-  cudaEventRecord(start);
-  CUDA_CHECK(cudaMemcpy(ctx.d_X, h_X, x_size_floats * sizeof(float), cudaMemcpyHostToDevice));
-  cudaEventRecord(stop);
-  cudaEventSynchronize(stop);
-  cudaEventElapsedTime(&ms, start, stop);
-  t_h2d_X += ms;
-  
-  delete[] h_X;
+  if (upload_X) {
+      float *h_X = flatten_X_col_major_full_simple(all_vars[0], num_vars, total_dps);
+      
+      cudaEventRecord(start);
+      CUDA_CHECK(cudaMemcpy(ctx.d_X, h_X, x_size_floats * sizeof(float), cudaMemcpyHostToDevice));
+      cudaEventRecord(stop);
+      cudaEventSynchronize(stop);
+      cudaEventElapsedTime(&ms, start, stop);
+      t_h2d_X += ms;
+      
+      delete[] h_X;
+  }
 
   // 3. Launch kernel
   int threads = 128;
@@ -265,7 +273,7 @@ void evaluate_gpu_simple(
 
   // 4. Reduce MSE
   int reduce_threads = 256;
-  size_t shared_mem = reduce_threads * (sizeof(double) + sizeof(int));
+  size_t shared_mem = reduce_threads * (sizeof(float) + sizeof(int));
   
   cudaEventRecord(start);
   reduce_mse_kernel_simple<<<num_exprs, reduce_threads, shared_mem>>>(ctx.d_sq_errors, ctx.d_mses, num_exprs, total_dps);
@@ -278,7 +286,7 @@ void evaluate_gpu_simple(
   mses.resize(num_exprs);
   
   cudaEventRecord(start);
-  CUDA_CHECK(cudaMemcpy(mses.data(), ctx.d_mses, num_exprs * sizeof(double), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(mses.data(), ctx.d_mses, num_exprs * sizeof(float), cudaMemcpyDeviceToHost));
   cudaEventRecord(stop);
   cudaEventSynchronize(stop);
   cudaEventElapsedTime(&ms, start, stop);
@@ -290,7 +298,7 @@ void evaluate_gpu_simple(
   // Print breakdown
   std::cout << "  [GPU Simple Breakdown]" << std::endl;
   std::cout << "    H2D (Tokens/Vals): " << t_h2d_tokens << " ms" << std::endl;
-  std::cout << "    H2D (Data X):      " << t_h2d_X << " ms" << std::endl;
+  std::cout << "    H2D (Data X):      " << t_h2d_X << " ms " << (upload_X ? "(Uploaded)" : "(Cached)") << std::endl;
   std::cout << "    Kernel (Eval):     " << t_kernel_eval << " ms" << std::endl;
   std::cout << "    Kernel (Reduce):   " << t_kernel_reduce << " ms" << std::endl;
   std::cout << "    D2H (Results):     " << t_d2h << " ms" << std::endl;
@@ -307,8 +315,8 @@ void destroy_gpu_simple_context(void* ctx) {
     delete static_cast<SimpleGPUContext*>(ctx);
 }
 
-void evaluate_gpu_simple_wrapper(InputInfo& input_info, double*** all_vars, std::vector<double>& mses, void* ctx) {
-    evaluate_gpu_simple(input_info, all_vars, mses, *static_cast<SimpleGPUContext*>(ctx));
+void evaluate_gpu_simple_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X) {
+    evaluate_gpu_simple(input_info, all_vars, mses, *static_cast<SimpleGPUContext*>(ctx), upload_X);
 }
 
 // }

@@ -46,7 +46,7 @@ struct GPUSubtreeStateContext {
   int *d_skel_offsets = nullptr;
   int *d_skel_lengths = nullptr;
   float *d_sq_errors = nullptr;
-  double *d_mses = nullptr;
+  float *d_mses = nullptr;   // Changed to float
   size_t alloc_skel_tokens = 0;
   size_t alloc_skel_values = 0;
   size_t alloc_skel_meta = 0; // for offsets, lengths (num_exprs)
@@ -123,7 +123,7 @@ struct GPUSubtreeStateContext {
         alloc_mses = alloc_skel_meta;
         CUDA_CHECK(cudaMalloc(&d_skel_offsets, alloc_skel_meta * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_skel_lengths, alloc_skel_meta * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&d_mses, alloc_mses * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_mses, alloc_mses * sizeof(float))); // Changed to float
     }
     size_t req_sq_errors = num_exprs * total_dps;
     if (req_sq_errors > alloc_sq_errors) {
@@ -151,7 +151,7 @@ struct SimpleGPUContext {
   int *d_lengths = nullptr;
   
   float *d_sq_errors = nullptr;
-  double *d_mses = nullptr;
+  float *d_mses = nullptr;   // Changed to float
   
   size_t alloc_tokens = 0;
   size_t alloc_values = 0;
@@ -192,7 +192,7 @@ struct SimpleGPUContext {
         alloc_mses = alloc_meta;
         CUDA_CHECK(cudaMalloc(&d_offsets, alloc_meta * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_lengths, alloc_meta * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&d_mses, alloc_mses * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_mses, alloc_mses * sizeof(float))); // Changed to float
     }
     size_t req_sq_errors = num_exprs * total_dps;
     if (req_sq_errors > alloc_sq_errors) {

@@ -51,9 +51,9 @@ static float eval_op_cpu(int op, float val1, float val2) {
     }
 }
 
-// Simple stack-based evaluator for one expression on one datapoint
+// Helper for single-point evaluation
 static float evaluate_single_expr(const int* tokens, const double* values, int num_tokens, 
-                                  const double* vars, int num_vars) {
+                                  const float* vars, int num_vars) {
     float stack[MAX_STACK_SIZE];
     int sp = 0;
 
@@ -65,7 +65,7 @@ static float evaluate_single_expr(const int* tokens, const double* values, int n
         } else if (tok == TOK_VAR) {
             int var_idx = (int)values[i];
             if (var_idx < num_vars) {
-                stack[sp++] = (float)vars[var_idx];
+                stack[sp++] = vars[var_idx];
             } else {
                 stack[sp++] = 0.0f; // Should not happen
             }
@@ -87,7 +87,7 @@ static float evaluate_single_expr(const int* tokens, const double* values, int n
 
 // Main entry point for CPU evaluation
 // Computes MSE for each expression
-void evaluate_cpu_mse(InputInfo& input_info, double*** all_vars, std::vector<double>& mses) {
+void evaluate_cpu_mse(InputInfo& input_info, float*** all_vars, std::vector<float>& mses) {
     int num_exprs = input_info.num_exprs;
     mses.resize(num_exprs);
 
@@ -102,14 +102,12 @@ void evaluate_cpu_mse(InputInfo& input_info, double*** all_vars, std::vector<dou
         
         // Data for this expression (vars[var_idx][dp_idx])
         // Note: all_vars is [expr][var][dp]
-        double** vars = all_vars[i];
+        float** vars = all_vars[i];
         
         // Ground truth is usually the last variable (index num_vars)
-        // But InputInfo structure implies vars are input features.
-        // Wait, load_data_file returns [num_vars+1][num_dps], where last row is y.
-        double* y_true = vars[num_vars]; 
+        float* y_true = vars[num_vars]; 
 
-        double total_sq_err = 0.0;
+        float total_sq_err = 0.0f;
         int valid_dps = 0;
 
         for (int dp = 0; dp < num_dps; dp++) {
@@ -119,7 +117,7 @@ void evaluate_cpu_mse(InputInfo& input_info, double*** all_vars, std::vector<dou
             // Since vars is column-major [var][dp], we can't just pass a pointer.
             // We need to gather them or change evaluate_single_expr.
             // Let's gather for simplicity (stack allocation is cheap)
-            double dp_vars[MAX_NUM_FEATURES];
+            float dp_vars[MAX_NUM_FEATURES];
             for (int v = 0; v < num_vars; v++) {
                 dp_vars[v] = vars[v][dp];
             }
@@ -127,7 +125,7 @@ void evaluate_cpu_mse(InputInfo& input_info, double*** all_vars, std::vector<dou
             float pred = evaluate_single_expr(tokens, values, num_tokens, dp_vars, num_vars);
             
             if (!std::isnan(pred) && !std::isinf(pred)) {
-                double diff = pred - y_true[dp];
+                float diff = pred - y_true[dp];
                 total_sq_err += diff * diff;
                 valid_dps++;
             }

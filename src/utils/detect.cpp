@@ -133,50 +133,71 @@ SubtreeDetectionResult detect_common_subtrees(
     // map: hash -> vector of candidates
     std::map<uint64_t, std::vector<SubtreeCandidate>> hash_map;
     
-    // Pre-allocate vectors for per-expression info to avoid repeated allocs
-    std::vector<int> sizes;
-    std::vector<uint64_t> hashes;
-    
-    for (int expr_id = 0; expr_id < num_exprs; expr_id++) {
-        int len = num_tokens[expr_id];
-        const int* toks = tokens[expr_id];
-        const double* vals = values[expr_id];
-        
-        sizes.resize(len);
-        hashes.resize(len);
-        
-        // Reverse pass
-        for (int i = len - 1; i >= 0; i--) {
-            int token = toks[i];
-            if (token <= 0) {
-                // Terminal
-                sizes[i] = 1;
-                hashes[i] = hash_node(token, vals[i], {});
-            } else {
-                // Operator
-                int arity = simple_op_arity(token);
-                int size = 1;
-                std::vector<uint64_t> child_hashes;
-                int pos = i + 1;
-                
-                for (int k = 0; k < arity; k++) {
-                    if (pos >= len) break; // Should not happen for valid prefix
-                    size += sizes[pos];
-                    child_hashes.push_back(hashes[pos]);
-                    pos += sizes[pos];
-                }
-                sizes[i] = size;
-                hashes[i] = hash_node(token, vals[i], child_hashes);
-            }
+    // Parallel hashing
+    #pragma omp parallel
+    {
+        std::map<uint64_t, std::vector<SubtreeCandidate>> local_hash_map;
+        std::vector<int> sizes;
+        std::vector<uint64_t> hashes;
+
+        #pragma omp for
+        for (int expr_id = 0; expr_id < num_exprs; expr_id++) {
+            int len = num_tokens[expr_id];
+            const int* toks = tokens[expr_id];
+            const double* vals = values[expr_id];
             
-            // Collect candidate
-            if (sizes[i] >= min_subtree_size) {
-                SubtreeCandidate cand;
-                cand.expr_id = expr_id;
-                cand.start_idx = i;
-                cand.size = sizes[i];
-                cand.hash = hashes[i];
-                hash_map[cand.hash].push_back(cand);
+            sizes.resize(len);
+            hashes.resize(len);
+            
+            // Reverse pass
+            for (int i = len - 1; i >= 0; i--) {
+                int token = toks[i];
+                if (token <= 0) {
+                    // Terminal
+                    sizes[i] = 1;
+                    hashes[i] = hash_node(token, vals[i], {});
+                } else {
+                    // Operator
+                    int arity = simple_op_arity(token);
+                    int size = 1; // Operator itself
+                    std::vector<uint64_t> child_hashes;
+                    
+                    // Since this is prefix, children follow immediately
+                    // But we need random access to 'hashes' which is computed in reverse.
+                    // Wait. In prefix, children are to the RIGHT.
+                    // If we scan in reverse (Right to Left), we have already computed children!
+                    // So we can access `hashes[pos]` safely.
+                    // The loop `for (int k = 0; k < arity; k++)` does this correctly.
+                    
+                    int pos = i + 1;
+                    for (int k = 0; k < arity; k++) {
+                        if (pos >= len) break; 
+                        size += sizes[pos];
+                        child_hashes.push_back(hashes[pos]);
+                        pos += sizes[pos];
+                    }
+                    sizes[i] = size;
+                    hashes[i] = hash_node(token, vals[i], child_hashes);
+                }
+                
+                // Collect candidate
+                if (sizes[i] >= min_subtree_size) {
+                    SubtreeCandidate cand;
+                    cand.expr_id = expr_id;
+                    cand.start_idx = i;
+                    cand.size = sizes[i];
+                    cand.hash = hashes[i];
+                    local_hash_map[cand.hash].push_back(cand);
+                }
+            }
+        }
+        
+        // Merge thread-local maps
+        #pragma omp critical
+        {
+            for (const auto& pair : local_hash_map) {
+                std::vector<SubtreeCandidate>& global_vec = hash_map[pair.first];
+                global_vec.insert(global_vec.end(), pair.second.begin(), pair.second.end());
             }
         }
     }
@@ -325,12 +346,25 @@ SubtreeDetectionResult detect_and_update_cache(
     // map: hash -> vector of candidates
     std::map<uint64_t, std::vector<SubtreeCandidate>> hash_map;
 
-    for (int i = 0; i < num_exprs; i++) {
-        for (int j = 0; j < num_tokens[i]; j++) {
-            int size = compute_subtree_size(tokens[i], j, num_tokens[i]);
-            if (size >= min_size) {
-                uint64_t h = compute_hash(tokens[i], values[i], size);
-                hash_map[h].push_back({i, j, size, h});
+    #pragma omp parallel
+    {
+        std::map<uint64_t, std::vector<SubtreeCandidate>> local_hash_map;
+        #pragma omp for
+        for (int i = 0; i < num_exprs; i++) {
+            for (int j = 0; j < num_tokens[i]; j++) {
+                int size = compute_subtree_size(tokens[i], j, num_tokens[i]);
+                if (size >= min_size) {
+                    uint64_t h = compute_hash(tokens[i], values[i], size);
+                    local_hash_map[h].push_back({i, j, size, h});
+                }
+            }
+        }
+        
+        #pragma omp critical
+        {
+            for (const auto& pair : local_hash_map) {
+                std::vector<SubtreeCandidate>& global_vec = hash_map[pair.first];
+                global_vec.insert(global_vec.end(), pair.second.begin(), pair.second.end());
             }
         }
     }

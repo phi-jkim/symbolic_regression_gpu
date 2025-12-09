@@ -1288,6 +1288,8 @@ int evaluate_evolution_benchmark(
             shared_data_ptr = load_data_file(info.data_filenames[0], info.num_vars[0], info.num_dps[0]);
             shared_num_vars = info.num_vars[0];
             shared_num_dps = info.num_dps[0];
+            (void)shared_num_vars;
+            (void)shared_num_dps;
         }
         free_input_info(info);
     }
