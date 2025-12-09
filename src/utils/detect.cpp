@@ -5,6 +5,12 @@
 #include <map>
 #include <vector>
 #include <algorithm>
+#include <thread>
+#include <vector>
+#include <cstdlib>
+#include <mutex>
+#include <condition_variable>
+#include <functional>
 
 // Simple arity function: token < 10 -> binary (arity 2), >= 10 -> unary (arity 1)
 static int simple_op_arity(int token) {
@@ -80,6 +86,11 @@ struct SubtreeCandidate {
     int start_idx;
     int size;
     uint64_t hash;
+    
+    // Determine sort order
+    bool operator<(const SubtreeCandidate& other) const {
+        return hash < other.hash;
+    }
 };
 
 // Merkle-style hash combination
@@ -115,8 +126,6 @@ SubtreeDetectionResult detect_common_subtrees(
     int min_subtree_size,
     int min_frequency)
 {
-    TimePoint start = measure_clock();
-    
     SubtreeDetectionResult result;
     result.num_exprs = num_exprs;
     
@@ -128,116 +137,126 @@ SubtreeDetectionResult detect_common_subtrees(
             result.expr_sub_hints[expr_id][i] = -1;
         }
     }
+    TimePoint start = measure_clock();
     
     // Step 1: Linear pass to compute sizes and hashes
-    // map: hash -> vector of candidates
-    std::map<uint64_t, std::vector<SubtreeCandidate>> hash_map;
+    static std::vector<SubtreeCandidate> all_candidates;
+    all_candidates.clear();
+    // Heuristic reserve
+    if (all_candidates.capacity() < (size_t)num_exprs * 10) {
+        all_candidates.reserve(num_exprs * 10);
+    }
     
-    // Parallel hashing
-    #pragma omp parallel
-    {
-        std::map<uint64_t, std::vector<SubtreeCandidate>> local_hash_map;
-        std::vector<int> sizes;
-        std::vector<uint64_t> hashes;
+    TimePoint t1;
+    TimePoint t2;
+    TimePoint t3;
+    // Build stats
+    long long total_input_tokens = 0;
+    for (int i = 0; i < num_exprs; i++) total_input_tokens += num_tokens[i];
 
-        #pragma omp for
-        for (int expr_id = 0; expr_id < num_exprs; expr_id++) {
-            int len = num_tokens[expr_id];
-            const int* toks = tokens[expr_id];
-            const double* vals = values[expr_id];
-            
-            sizes.resize(len);
-            hashes.resize(len);
-            
-            // Reverse pass
-            for (int i = len - 1; i >= 0; i--) {
-                int token = toks[i];
-                if (token <= 0) {
-                    // Terminal
-                    sizes[i] = 1;
-                    hashes[i] = hash_node(token, vals[i], {});
-                } else {
-                    // Operator
-                    int arity = simple_op_arity(token);
-                    int size = 1; // Operator itself
-                    std::vector<uint64_t> child_hashes;
-                    
-                    // Since this is prefix, children follow immediately
-                    // But we need random access to 'hashes' which is computed in reverse.
-                    // Wait. In prefix, children are to the RIGHT.
-                    // If we scan in reverse (Right to Left), we have already computed children!
-                    // So we can access `hashes[pos]` safely.
-                    // The loop `for (int k = 0; k < arity; k++)` does this correctly.
-                    
-                    int pos = i + 1;
-                    for (int k = 0; k < arity; k++) {
-                        if (pos >= len) break; 
-                        size += sizes[pos];
-                        child_hashes.push_back(hashes[pos]);
-                        pos += sizes[pos];
-                    }
-                    sizes[i] = size;
-                    hashes[i] = hash_node(token, vals[i], child_hashes);
-                }
-                
-                // Collect candidate
-                if (sizes[i] >= min_subtree_size) {
-                    SubtreeCandidate cand;
-                    cand.expr_id = expr_id;
-                    cand.start_idx = i;
-                    cand.size = sizes[i];
-                    cand.hash = hashes[i];
-                    local_hash_map[cand.hash].push_back(cand);
-                }
-            }
-        }
+    // Buffers to avoid allocation inside loop
+    static std::vector<int> sizes;
+    static std::vector<uint64_t> hashes;
+
+    for (int expr_id = 0; expr_id < num_exprs; expr_id++) {
+        int len = num_tokens[expr_id];
+        const int* toks = tokens[expr_id];
+        const double* vals = values[expr_id];
         
-        // Merge thread-local maps
-        #pragma omp critical
-        {
-            for (const auto& pair : local_hash_map) {
-                std::vector<SubtreeCandidate>& global_vec = hash_map[pair.first];
-                global_vec.insert(global_vec.end(), pair.second.begin(), pair.second.end());
+        sizes.resize(len);
+        hashes.resize(len);
+        
+        // Reverse pass
+        for (int i = len - 1; i >= 0; i--) {
+            int token = toks[i];
+            if (token <= 0) {
+                // Terminal
+                sizes[i] = 1;
+                hashes[i] = hash_node(token, vals[i], {});
+            } else {
+                // Operator
+                int arity = simple_op_arity(token);
+                int size = 1;
+                std::vector<uint64_t> child_hashes;
+                int pos = i + 1;
+                
+                for (int k = 0; k < arity; k++) {
+                    if (pos >= len) break;
+                    size += sizes[pos];
+                    child_hashes.push_back(hashes[pos]);
+                    pos += sizes[pos];
+                }
+                sizes[i] = size;
+                hashes[i] = hash_node(token, vals[i], child_hashes);
+            }
+            
+            // Collect candidate
+            if (sizes[i] >= min_subtree_size) {
+                SubtreeCandidate cand;
+                cand.expr_id = expr_id;
+                cand.start_idx = i;
+                cand.size = sizes[i];
+                cand.hash = hashes[i];
+                all_candidates.push_back(cand);
             }
         }
     }
+    
+    // Global sort
+    std::sort(all_candidates.begin(), all_candidates.end());
+    
+    TimePoint t_hash_end = measure_clock();
+    
+    // Logic merge time is effectively zero in sequential, 
+    // but here we count the sort as hash+merge or just hash.
+    // Let's call the loop "Hash" and sort "Merge" loosely to keep format.
+    
+    t1 = measure_clock();
     
     // Step 2: Filter and Verify
     std::vector<std::vector<SubtreeCandidate>> verified_subtrees;
     
-    for (auto& kv : hash_map) {
-        if ((int)kv.second.size() < min_frequency) continue;
-        
-        std::vector<SubtreeCandidate>& candidates = kv.second;
-        
-        // Verify against first candidate (to handle hash collisions)
-        // Note: Merkle hash is strong, but we still verify token sequence match
-        // which is O(Size).
-        
-        const SubtreeCandidate& ref = candidates[0];
-        const int* ref_tokens = tokens[ref.expr_id] + ref.start_idx;
-        const double* ref_values = values[ref.expr_id] + ref.start_idx;
-        
-        std::vector<SubtreeCandidate> verified;
-        verified.push_back(ref);
-        
-        for (size_t k = 1; k < candidates.size(); k++) {
-            const auto& cand = candidates[k];
-            // Quick size check (should match if hash matches, but good sanity)
-            if (cand.size != ref.size) continue;
-            
-            const int* cand_tokens = tokens[cand.expr_id] + cand.start_idx;
-            const double* cand_values = values[cand.expr_id] + cand.start_idx;
-            
-            if (subtrees_match(ref_tokens, ref_values, cand_tokens, cand_values, cand.size)) {
-                verified.push_back(cand);
+    if (!all_candidates.empty()) {
+        size_t n = all_candidates.size();
+        size_t i = 0;
+        while (i < n) {
+            size_t j = i + 1;
+            // Find range with same hash
+            while (j < n && all_candidates[j].hash == all_candidates[i].hash) {
+                j++;
             }
-        }
-        
-        if ((int)verified.size() >= min_frequency) {
-            verified_subtrees.push_back(verified);
+            
+            int count = (int)(j - i);
+            if (count >= min_frequency) {
+                // Verify this group
+                const SubtreeCandidate& ref = all_candidates[i];
+                const int* ref_tokens = tokens[ref.expr_id] + ref.start_idx;
+                const double* ref_values = values[ref.expr_id] + ref.start_idx;
+                
+                std::vector<SubtreeCandidate> verified;
+                verified.reserve(count);
+                
+                for (size_t k = i; k < j; k++) {
+                    const SubtreeCandidate& cand = all_candidates[k];
+                    const int* cand_tokens = tokens[cand.expr_id] + cand.start_idx;
+                    const double* cand_values = values[cand.expr_id] + cand.start_idx;
+                    
+                    if (cand.size == ref.size && 
+                        subtrees_match(ref_tokens, ref_values, cand_tokens, cand_values, ref.size)) {
+                        verified.push_back(cand);
+                    }
+                }
+                
+                if ((int)verified.size() >= min_frequency) {
+                    verified_subtrees.push_back(std::move(verified));
+                }
+            }
+            
+            i = j;
         }
     }
+    
+    t2 = measure_clock();
     
     // Step 3: Sort by size descending
     std::sort(verified_subtrees.begin(), verified_subtrees.end(),
@@ -280,21 +299,20 @@ SubtreeDetectionResult detect_common_subtrees(
                 result.sub_occ_expr[sub_id][occ] = verified[occ].expr_id;
                 result.sub_occ_idx[sub_id][occ] = verified[occ].start_idx;
                 
-                // Check overlap
+                // Check if this occurrence is still valid (not overlapping with higher priority subtree)
                 bool overlap = false;
                 for (int k = 0; k < ref.size; k++) {
                     if (result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx + k] != -1) {
-                        overlap = true;
-                        break;
+                         overlap = true;
+                         break;
                     }
                 }
                 
                 if (!overlap) {
-                    // Mark root
-                    result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx] = sub_id;
-                    // Mark body
+                    // Mark as used
+                    result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx] = sub_id; // Mark root
                     for (int k = 1; k < ref.size; k++) {
-                        result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx + k] = -2;
+                        result.expr_sub_hints[verified[occ].expr_id][verified[occ].start_idx + k] = -2; // Mark body (different ID)
                     }
                 }
             }
@@ -308,11 +326,67 @@ SubtreeDetectionResult detect_common_subtrees(
         result.sub_occ_idx = nullptr;
     }
     
+    t3 = measure_clock();
     result.analysis_time_ms = clock_to_ms(start, measure_clock());
+    double dt_hash_only = clock_to_ms(start, t_hash_end);
+    double dt_merge = clock_to_ms(t_hash_end, t1);
+    double dt_filter = clock_to_ms(t1, t2);
+    double dt_build = clock_to_ms(t2, t3);
+    
+    // Stats
+    long long total_detected_mass = 0; // unique subtree size * occurrences
+    long long total_covered_tokens = 0; // actual tokens covered in hints
+    for (int sub_id = 0; sub_id < result.num_subs; sub_id++) {
+        total_detected_mass += (long long)result.num_sub_tokens[sub_id] * result.num_occurrences[sub_id];
+    }
+    
+    // Calculate exact covered tokens from hints
+    /* 
+       This is expensive to re-scan. 
+       Let's approximate with sum of mass of *marked* occurrences if we tracked them.
+       But we didn't track count of marked.
+       Let's just use total_detected_mass for "Compression Potential" 
+       and maybe just ratio of unique detected mass?
+       User asked for "covered tokens / total tokens".
+       Technically that is: tokens participating in ANY subtree.
+       Since we marked them in hints, we can just assume if we used greedy marking:
+       Sum of sizes of accepted occurrences.
+       Let's count exact covered tokens by scanning hints?
+       O(total_tokens). Acceptable? Yes, it's fast.
+    */
+    for (int i = 0; i < num_exprs; i++) {
+        for (int j = 0; j < num_tokens[i]; j++) {
+            if (result.expr_sub_hints[i][j] != -1) {
+                total_covered_tokens++;
+            }
+        }
+    }
+
+    // double avg_tokens = result.num_subs > 0 ? (double)total_detected_mass / result.num_subs : 0.0; 
+    // User said "average tokens". Usually means Avg Size of Detected Subtrees.
+    double avg_subtree_size = 0;
+    if (result.num_subs > 0) {
+        long long sum_size = 0;
+        for(int i=0; i<result.num_subs; ++i) sum_size += result.num_sub_tokens[i];
+        avg_subtree_size = (double)sum_size / result.num_subs;
+    }
+    
+    double coverage = (double)total_covered_tokens / total_input_tokens;
+
+    // Fill result stats
+    result.avg_subtree_size = avg_subtree_size;
+    result.coverage_ratio = coverage;
+    result.total_covered_tokens = total_covered_tokens;
+    
+    std::cout << "[DetectCommon] Tot: " << result.analysis_time_ms << "ms | Hash: " << dt_hash_only 
+                  << "ms | Merge: " << dt_merge << "ms | Filt: " << dt_filter << "ms | Build: " << dt_build << "ms\n"
+              << "               Stats: Trees=" << result.num_subs << " AvgSz=" << avg_subtree_size 
+              << " Cov=" << (coverage * 100.0) << "% (" << total_covered_tokens << "/" << total_input_tokens << ")" << std::endl;
     
     return result;
 }
 
+// SHOULD NOT USE ANYMORE
 // Stateful detection: checks cache first, adds new common subtrees
 SubtreeDetectionResult detect_and_update_cache(
     SubtreeCache& cache,
@@ -342,29 +416,21 @@ SubtreeDetectionResult detect_and_update_cache(
         for (int j = 0; j < num_tokens[i]; j++) result.expr_sub_hints[i][j] = -1;
     }
 
+    TimePoint t_start = measure_clock();
+
     // Step 1: Hash all subtrees in current batch
+    TimePoint t1 = measure_clock();
     // map: hash -> vector of candidates
     std::map<uint64_t, std::vector<SubtreeCandidate>> hash_map;
 
-    #pragma omp parallel
-    {
-        std::map<uint64_t, std::vector<SubtreeCandidate>> local_hash_map;
-        #pragma omp for
-        for (int i = 0; i < num_exprs; i++) {
-            for (int j = 0; j < num_tokens[i]; j++) {
-                int size = compute_subtree_size(tokens[i], j, num_tokens[i]);
-                if (size >= min_size) {
-                    uint64_t h = compute_hash(tokens[i], values[i], size);
-                    local_hash_map[h].push_back({i, j, size, h});
-                }
-            }
-        }
-        
-        #pragma omp critical
-        {
-            for (const auto& pair : local_hash_map) {
-                std::vector<SubtreeCandidate>& global_vec = hash_map[pair.first];
-                global_vec.insert(global_vec.end(), pair.second.begin(), pair.second.end());
+    // Sequential implementation (OpenMP removed)
+    // If needed, parallelize with std::thread similar to detect_common_subtrees
+    for (int i = 0; i < num_exprs; i++) {
+        for (int j = 0; j < num_tokens[i]; j++) {
+            int size = compute_subtree_size(tokens[i], j, num_tokens[i]);
+            if (size >= min_size) {
+                uint64_t h = compute_hash(tokens[i], values[i], size);
+                hash_map[h].push_back({i, j, size, h});
             }
         }
     }
@@ -377,6 +443,11 @@ SubtreeDetectionResult detect_and_update_cache(
     // Check existing cache hits
     // int cache_hits = 0;
     // int new_subs = 0;
+
+    double dt_hash = clock_to_ms(t1, measure_clock());
+
+    // Step 2: Identify subtrees (both cached and new)
+    TimePoint t2 = measure_clock();
 
     // For new candidates, we need to filter by frequency
     for (auto& pair : hash_map) {
@@ -438,7 +509,10 @@ SubtreeDetectionResult detect_and_update_cache(
         }
     }
     
+    double dt_update = clock_to_ms(t2, measure_clock());
+
     // Re-scan to collect all valid candidates (cached or new-high-freq)
+    TimePoint t3 = measure_clock();
     std::vector<std::vector<SubtreeCandidate>> valid_groups;
     
     for (auto& pair : hash_map) {
@@ -481,6 +555,13 @@ SubtreeDetectionResult detect_and_update_cache(
             }
         }
     }
+
+    double dt_mark = clock_to_ms(t3, measure_clock());
+    double dt_total = clock_to_ms(t_start, measure_clock());
+
+    // Only print if slow or verbose requested (for now always print for debugging)
+    std::cout << "[Detect] Tot: " << dt_total << "ms | Hash: " << dt_hash 
+              << "ms | Update: " << dt_update << "ms | Mark: " << dt_mark << "ms" << std::endl;
     
     // We don't populate result.sub_tokens etc because the evaluator will use the cache directly.
     // But we need to tell the evaluator which cache entries are NEW and need computation.

@@ -189,7 +189,8 @@ void evaluate_gpu_simple(
     float ***all_vars,
     std::vector<float> &mses,
     SimpleGPUContext &ctx,
-    bool upload_X) {
+    bool upload_X,
+    RunStats& stats) {
 
   int num_exprs = input_info.num_exprs;
   if (num_exprs == 0) return;
@@ -292,6 +293,10 @@ void evaluate_gpu_simple(
   cudaEventElapsedTime(&ms, start, stop);
   t_d2h += ms;
 
+  // Fill Runtime Stats
+  stats.data_transfer_time_ms = t_h2d_tokens + t_h2d_X + t_d2h;
+  stats.gpu_kernel_time_ms = t_kernel_eval + t_kernel_reduce;
+
   cudaEventDestroy(start);
   cudaEventDestroy(stop);
 
@@ -315,8 +320,19 @@ void destroy_gpu_simple_context(void* ctx) {
     delete static_cast<SimpleGPUContext*>(ctx);
 }
 
-void evaluate_gpu_simple_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X) {
-    evaluate_gpu_simple(input_info, all_vars, mses, *static_cast<SimpleGPUContext*>(ctx), upload_X);
+// Wrapper implementation
+void evaluate_gpu_simple_wrapper(
+    InputInfo& input_info, 
+    float*** all_vars, 
+    std::vector<float>& mses, 
+    void* ctx, 
+    bool upload_X,
+    RunStats& stats) 
+{
+    SimpleGPUContext* gpu_ctx = (SimpleGPUContext*)ctx;
+    TimePoint total_start = measure_clock();
+    evaluate_gpu_simple(input_info, all_vars, mses, *gpu_ctx, upload_X, stats);
+    stats.total_eval_time_ms = clock_to_ms(total_start, measure_clock());
 }
 
 // }

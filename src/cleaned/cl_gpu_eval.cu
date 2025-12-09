@@ -335,7 +335,8 @@ void evaluate_gpu_mse(
     std::vector<float> &mses,
     GPUSubtreeStateContext &ctx,
     bool upload_X,
-    bool clear_cache) {
+    bool clear_cache,
+    RunStats& stats) {
 
   int num_exprs = input_info.num_exprs;
   if (num_exprs == 0) return;
@@ -371,6 +372,12 @@ void evaluate_gpu_mse(
       num_exprs, num_vars, input_info.num_tokens,
       (const int **)input_info.tokens, (const double **)input_info.values, 7, 10);
   t_cpu_detect = (float)clock_to_ms(t1, measure_clock());
+  // Fill Detection Stats
+  stats.drift_detect_time_ms = t_cpu_detect;
+  stats.num_subtrees = result.num_subs;
+  stats.avg_subtree_size = result.avg_subtree_size;
+  stats.coverage = result.coverage_ratio;
+  
   nvtxRangePop();
 
   // 2. Update cache
@@ -536,6 +543,10 @@ void evaluate_gpu_mse(
   cudaEventElapsedTime(&ms, start, stop);
   t_d2h += ms;
 
+  // Fill Runtime Stats
+  stats.data_transfer_time_ms = t_h2d_sub + t_h2d_skel + t_h2d_X + t_d2h;
+  stats.gpu_kernel_time_ms = t_kernel_sub + t_kernel_skel + t_kernel_reduce;
+
   free_subtree_detection_result(result);
   cudaEventDestroy(start);
   cudaEventDestroy(stop);
@@ -563,8 +574,21 @@ void destroy_gpu_context(void* ctx) {
     delete static_cast<GPUSubtreeStateContext*>(ctx);
 }
 
-void evaluate_gpu_mse_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, bool clear_cache) {
-    evaluate_gpu_mse(input_info, all_vars, mses, *static_cast<GPUSubtreeStateContext*>(ctx), upload_X, clear_cache);
+// Wrapper implementation
+void evaluate_gpu_mse_wrapper(
+    InputInfo& input_info, 
+    float*** all_vars, 
+    std::vector<float>& mses, 
+    void* ctx, 
+    bool upload_X, 
+    bool clear_cache,
+    RunStats& stats) 
+{
+    GPUSubtreeStateContext* gpu_ctx = (GPUSubtreeStateContext*)ctx;
+    TimePoint total_start = measure_clock();
+    evaluate_gpu_mse(input_info, all_vars, mses, *gpu_ctx, upload_X, clear_cache, stats);
+    // Note: evaluate_gpu_mse fills most stats, but we can double check total time
+    stats.total_eval_time_ms = clock_to_ms(total_start, measure_clock());
 }
 
 // }

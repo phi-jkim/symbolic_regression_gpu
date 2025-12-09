@@ -11,17 +11,17 @@
 #ifdef USE_GPU_SUBTREE
 void* create_gpu_context();
 void destroy_gpu_context(void* ctx);
-void evaluate_gpu_mse_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, bool clear_cache);
+void evaluate_gpu_mse_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, bool clear_cache, RunStats& stats);
 #endif
 
 #ifdef USE_GPU_SIMPLE
 void* create_gpu_simple_context();
 void destroy_gpu_simple_context(void* ctx);
-void evaluate_gpu_simple_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X);
+void evaluate_gpu_simple_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, RunStats& stats);
 #endif
 
 #ifdef USE_CPU
-void evaluate_cpu_mse(InputInfo& input_info, float*** all_vars, std::vector<float>& mses);
+void evaluate_cpu_mse(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, RunStats& stats);
 #endif
 
 struct Individual {
@@ -80,6 +80,34 @@ int main(int argc, char** argv) {
     for(int i=0; i<=num_vars; i++) free(shared_data_double[i]);
     free(shared_data_double);
 
+    // Prepare CSV Output
+    // Sanitize eval name for filename
+    std::string safe_eval_name = eval_name;
+    for (char &c : safe_eval_name) {
+        if (c == ' ' || c == '(' || c == ')') c = '_';
+    }
+    // Remove consecutive underscores
+    std::string::iterator new_end = std::unique(safe_eval_name.begin(), safe_eval_name.end(), 
+        [](char a, char b){ return a == '_' && b == '_'; });
+    safe_eval_name.erase(new_end, safe_eval_name.end());
+    
+    // Trim leading/trailing underscores
+    if (!safe_eval_name.empty() && safe_eval_name.front() == '_') safe_eval_name.erase(0, 1);
+    if (!safe_eval_name.empty() && safe_eval_name.back() == '_') safe_eval_name.pop_back();
+
+    std::string csv_filename = "../../data/output/sr_results/sr_results_" + safe_eval_name + 
+                               "_gen" + std::to_string(gens) + 
+                               "_pop" + std::to_string(pop_size) + 
+                               "_dps" + std::to_string(num_dps) + ".csv";
+    
+    std::ofstream csv_file(csv_filename);
+    if (!csv_file.is_open()) {
+        std::cerr << "Failed to open CSV file: " << csv_filename << std::endl;
+    } else {
+        // CSV Header
+        csv_file << "Gen,BestMSE,MedianMSE,TotalTimeMs,DetectTimeMs,H2D_D2H_TimeMs,KernelTimeMs,NumSubtrees,AvgSubtreeSize,Coverage\n";
+    }
+
     // Initialize Population
     std::vector<Individual> population(pop_size);
     EvolutionParams params;
@@ -100,102 +128,94 @@ int main(int argc, char** argv) {
     eval_ctx = create_gpu_simple_context();
     #endif
 
-    // Stats
-    std::ofstream csv("evolution_trace.csv");
-    csv << "Gen,BestMSE,AvgMSE,P25,P50,P75,P90,TimeMS\n";
-
     // Main Loop
+    std::vector<float> mses(pop_size);
+    std::vector<float*> var_ptrs(pop_size);
+    for(int i=0; i<pop_size; i++) var_ptrs[i] = (float*)shared_data_float;
+
     for(int gen=0; gen<gens; gen++) {
-        // 1. Pack InputInfo
-        InputInfo info;
-        info.num_exprs = pop_size;
-        info.num_vars = new int[pop_size];
-        info.num_dps = new int[pop_size];
-        info.num_tokens = new int[pop_size];
-        info.tokens = new int*[pop_size];
-        info.values = new double*[pop_size];
+        std::cout << "Gen " << gen << ": ";
+
+        // 1. Evaluate
+        float*** all_vars_ptr = new float**[pop_size];
+        for(int i=0; i<pop_size; i++) all_vars_ptr[i] = shared_data_float;
+
+        InputInfo batch_info;
+        batch_info.num_exprs = pop_size;
+        batch_info.num_vars = new int[pop_size];
+        batch_info.num_dps = new int[pop_size];
+        batch_info.num_tokens = new int[pop_size];
+        batch_info.tokens = new int*[pop_size];
+        batch_info.values = new double*[pop_size];
         
         double** temp_values_double = new double*[pop_size];
-        
-        int max_tokens = 0;
+        int max_tokens_in_batch = 0;
+
         for(int i=0; i<pop_size; i++) {
-            info.num_vars[i] = num_vars;
-            info.num_dps[i] = num_dps;
-            info.num_tokens[i] = population[i].tokens.size();
-            info.tokens[i] = population[i].tokens.data();
+            batch_info.num_vars[i] = num_vars;
+            batch_info.num_dps[i] = num_dps;
+            batch_info.num_tokens[i] = population[i].tokens.size();
+            batch_info.tokens[i] = population[i].tokens.data();
             
-            if (info.num_tokens[i] > max_tokens) max_tokens = info.num_tokens[i];
+            if (batch_info.num_tokens[i] > max_tokens_in_batch) max_tokens_in_batch = batch_info.num_tokens[i];
             
-            temp_values_double[i] = new double[info.num_tokens[i]];
-            for(int k=0; k<info.num_tokens[i]; k++) {
+            temp_values_double[i] = new double[batch_info.num_tokens[i]];
+            for(int k=0; k<batch_info.num_tokens[i]; k++) {
                 temp_values_double[i][k] = (double)population[i].values[k];
             }
-            info.values[i] = temp_values_double[i];
+            batch_info.values[i] = temp_values_double[i];
         }
-        info.max_num_dps = num_dps; // Important
-        info.max_tokens = max_tokens;
-        info.max_num_features = num_vars + 1;
+        batch_info.max_num_dps = num_dps;
+        batch_info.max_tokens = max_tokens_in_batch;
+        batch_info.max_num_features = num_vars + 1;
 
-        // Prepare all_vars (Input Data)
-        float*** all_vars = new float**[pop_size];
-        for(int i=0; i<pop_size; i++) all_vars[i] = shared_data_float;
+        RunStats stats;
 
-        // 2. Evaluate
-        std::vector<float> mses;
-        bool upload_X = (gen == 0);
-        (void)upload_X; // Suppress unused warning for CPU
-        TimePoint t0 = measure_clock();
-        
         #ifdef USE_GPU_SUBTREE
-        evaluate_gpu_mse_wrapper(info, all_vars, mses, eval_ctx, upload_X, true);
+        evaluate_gpu_mse_wrapper(batch_info, all_vars_ptr, mses, eval_ctx, (gen==0), false, stats);
         #elif defined(USE_GPU_SIMPLE)
-        evaluate_gpu_simple_wrapper(info, all_vars, mses, eval_ctx, upload_X);
+        evaluate_gpu_simple_wrapper(batch_info, all_vars_ptr, mses, eval_ctx, (gen==0), stats);
         #elif defined(USE_CPU)
-        evaluate_cpu_mse(info, all_vars, mses);
+        evaluate_cpu_mse(batch_info, all_vars_ptr, mses, stats);
         #endif
-        
-        double dt = clock_to_ms(t0, measure_clock());
 
-        // 3. Update Fitness & Stats
-        std::vector<float> valid_mses;
-        valid_mses.reserve(pop_size);
+        // Cleanup Info immediately after eval
+        delete[] batch_info.num_vars;
+        delete[] batch_info.num_dps;
+        delete[] batch_info.num_tokens;
+        delete[] batch_info.tokens;
+        delete[] batch_info.values;
+        for(int i=0; i<pop_size; i++) delete[] temp_values_double[i];
+        delete[] temp_values_double;
+        delete[] all_vars_ptr;
 
-        float min_mse = 1e30f;
-        double sum_mse = 0.0;
+        // 2. Statistics & Fitness Assignment
+        float best_mse = 1e9;
+        std::vector<float> sorted_mses;
+        sorted_mses.reserve(pop_size);
         int best_ind_idx = -1;
-        
+
         for(int i=0; i<pop_size; i++) {
+            // Assign fitness to individual
             population[i].fitness = mses[i];
+            
             if (!std::isnan(mses[i]) && !std::isinf(mses[i])) {
-                valid_mses.push_back(mses[i]);
-                if (mses[i] < min_mse) {
-                    min_mse = mses[i];
+                if(mses[i] < best_mse) {
+                    best_mse = mses[i];
                     best_ind_idx = i;
                 }
-                sum_mse += mses[i];
+                sorted_mses.push_back(mses[i]);
             }
         }
         
-        float avg_mse = valid_mses.empty() ? NAN : (float)(sum_mse / valid_mses.size());
-        
-        // Percentiles
-        float p25 = NAN, p50 = NAN, p75 = NAN, p90 = NAN;
-        if (!valid_mses.empty()) {
-            std::sort(valid_mses.begin(), valid_mses.end());
-            auto get_p = [&](float p) {
-                int idx = (int)(p * valid_mses.size());
-                if (idx >= (int)valid_mses.size()) idx = (int)valid_mses.size() - 1;
-                return valid_mses[idx];
-            };
-            p25 = get_p(0.25f);
-            p50 = get_p(0.50f);
-            p75 = get_p(0.75f);
-            p90 = get_p(0.90f);
+        float median_mse = 0;
+        if (!sorted_mses.empty()) {
+            std::sort(sorted_mses.begin(), sorted_mses.end());
+            median_mse = sorted_mses[sorted_mses.size()/2];
         }
-        
-        std::cout << "Gen " << gen << ": " << dt << " ms | Best: " << min_mse 
-                  << " | P50: " << p50 << " | P90: " << p90 << std::endl;
-        
+
+        std::cout << "Best MSE: " << best_mse << " Time: " << stats.total_eval_time_ms << "ms" << std::endl;
+
         if (best_ind_idx != -1) {
              std::vector<double> d_vals(population[best_ind_idx].values.size());
              for(size_t k=0; k<d_vals.size(); k++) d_vals[k] = (double)population[best_ind_idx].values[k];
@@ -205,19 +225,27 @@ int main(int argc, char** argv) {
              std::cout << "  Best Expr: " << formula << std::endl;
         }
 
-        csv << gen << "," << min_mse << "," << avg_mse << "," 
-            << p25 << "," << p50 << "," << p75 << "," << p90 << "," 
-            << dt << "\n";
+        if (csv_file.is_open()) {
+            csv_file << gen << "," 
+                     << best_mse << "," 
+                     << median_mse << "," 
+                     << stats.total_eval_time_ms << ","
+                     << stats.drift_detect_time_ms << ","
+                     << stats.data_transfer_time_ms << ","
+                     << stats.gpu_kernel_time_ms << ","
+                     << stats.num_subtrees << ","
+                     << stats.avg_subtree_size << ","
+                     << stats.coverage << "\n";
+            if (gen % 10 == 0) csv_file.flush(); 
+        }
 
-        // 4. Selection & Breeding
-        // Sort
+        // 3. Selection & Breeding
+        // Sort population by fitness
         std::sort(population.begin(), population.end(), [](const Individual& a, const Individual& b) {
-            // handle NaN
             if (std::isnan(a.fitness)) return false;
             if (std::isnan(b.fitness)) return true;
             return a.fitness < b.fitness;
         });
-        
         // if (min_mse < 1e-10) {
         //     std::cout << "Solution Found!" << std::endl;
         //     break;
@@ -258,16 +286,7 @@ int main(int argc, char** argv) {
         }
         population = next_gen;
 
-        // Cleanup Info
-        delete[] all_vars;
-        delete[] info.num_vars;
-        delete[] info.num_dps;
-        delete[] info.num_tokens;
-        delete[] info.tokens;
-        // Free temp doubles
-        for(int i=0; i<pop_size; i++) delete[] temp_values_double[i];
-        delete[] temp_values_double;
-        delete[] info.values;
+
     }
 
     #ifdef USE_GPU_SUBTREE

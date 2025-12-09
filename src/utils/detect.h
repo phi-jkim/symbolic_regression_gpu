@@ -30,7 +30,13 @@ typedef struct {
     
     // Metadata
     int num_exprs;              // Number of expressions analyzed
-    double analysis_time_ms;    // Time taken for detection
+    
+    double analysis_time_ms;
+    
+    // Stats
+    double avg_subtree_size;
+    double coverage_ratio;
+    long long total_covered_tokens;
 } SubtreeDetectionResult;
 
 // Detect common subtrees across multiple expressions

@@ -9,17 +9,17 @@
 #include <algorithm>
 
 // Forward declarations
-void evaluate_cpu_mse(InputInfo& input_info, float*** all_vars, std::vector<float>& mses);
+void evaluate_cpu_mse(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, RunStats& stats);
 
 // Wrapper for GPU eval that manages static/persistent context internally or via a handle
 void* create_gpu_context();
 void destroy_gpu_context(void* ctx);
-void evaluate_gpu_mse_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, bool clear_cache);
+void evaluate_gpu_mse_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, bool clear_cache, RunStats& stats);
 
 // Simple GPU eval wrappers
 void* create_gpu_simple_context();
 void destroy_gpu_simple_context(void* ctx);
-void evaluate_gpu_simple_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X);
+void evaluate_gpu_simple_wrapper(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, void* ctx, bool upload_X, RunStats& stats);
 
 
 int main(int argc, char** argv) {
@@ -131,12 +131,14 @@ int main(int argc, char** argv) {
 
         bool upload_X = (gen == 0);
         std::vector<float> gpu_simple_mses;
-        TimePoint t1 = measure_clock();
-        evaluate_gpu_simple_wrapper(info, all_vars, gpu_simple_mses, gpu_simple_ctx, upload_X);
-        double ms = clock_to_ms(t1, measure_clock());
+        TimePoint t1_simple = measure_clock();
+        RunStats dummy_stats_simple;
+        evaluate_gpu_simple_wrapper(info, all_vars, gpu_simple_mses, gpu_simple_ctx, upload_X, dummy_stats_simple);
+        double ms_simple = clock_to_ms(t1_simple, measure_clock());
         
-        simple_results[gen] = compute_stats(gpu_simple_mses, ms);
-        std::cout << "Gen " << gen << ": " << ms << " ms" << std::endl;
+        simple_results[gen] = compute_stats(gpu_simple_mses, ms_simple);
+        
+        std::cout << "Gen " << gen << " Simple: " << ms_simple << " ms" << std::endl;
 
         delete[] all_vars;
         free_input_info(info);
@@ -163,7 +165,8 @@ int main(int argc, char** argv) {
         std::vector<float> gpu_mses;
         TimePoint t1 = measure_clock();
         // clear_cache = false (default) unless experimenting
-        evaluate_gpu_mse_wrapper(info, all_vars, gpu_mses, gpu_ctx, upload_X, true); 
+        RunStats dummy_stats;
+        evaluate_gpu_mse_wrapper(info, all_vars, gpu_mses, gpu_ctx, upload_X, true, dummy_stats); 
         double ms = clock_to_ms(t1, measure_clock());
         
         GenStats opt_stats = compute_stats(gpu_mses, ms);
@@ -174,7 +177,8 @@ int main(int argc, char** argv) {
         if (verify_cpu) {
              std::vector<float> cpu_mses;
              TimePoint t2 = measure_clock();
-             evaluate_cpu_mse(info, all_vars, cpu_mses);
+             RunStats dummy_stats_cpu;
+             evaluate_cpu_mse(info, all_vars, cpu_mses, dummy_stats_cpu);
              cpu_ms = clock_to_ms(t2, measure_clock());
         }
 

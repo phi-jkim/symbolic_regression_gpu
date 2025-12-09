@@ -3,6 +3,10 @@
 #include <vector>
 #include <cmath>
 #include <iostream>
+#include <thread>
+#include <mutex>
+#include <cstdlib>
+#include <algorithm>
 
 #ifndef MAX_NUM_FEATURES
 #define MAX_NUM_FEATURES 32
@@ -87,54 +91,78 @@ static float evaluate_single_expr(const int* tokens, const double* values, int n
 
 // Main entry point for CPU evaluation
 // Computes MSE for each expression
-void evaluate_cpu_mse(InputInfo& input_info, float*** all_vars, std::vector<float>& mses) {
+void evaluate_cpu_mse(InputInfo& input_info, float*** all_vars, std::vector<float>& mses, RunStats& stats) {
+    TimePoint start = measure_clock();
+    
     int num_exprs = input_info.num_exprs;
     mses.resize(num_exprs);
 
     // For each expression
-    #pragma omp parallel for
-    for (int i = 0; i < num_exprs; i++) {
-        int num_dps = input_info.num_dps[i];
-        int num_vars = input_info.num_vars[i];
-        int num_tokens = input_info.num_tokens[i];
-        int* tokens = input_info.tokens[i];
-        double* values = input_info.values[i];
-        
-        // Data for this expression (vars[var_idx][dp_idx])
-        // Note: all_vars is [expr][var][dp]
-        float** vars = all_vars[i];
-        
-        // Ground truth is usually the last variable (index num_vars)
-        float* y_true = vars[num_vars]; 
-
-        float total_sq_err = 0.0f;
-        int valid_dps = 0;
-
-        for (int dp = 0; dp < num_dps; dp++) {
-            // Extract input features for this datapoint
-            // We need to pass a pointer to the variables for this specific datapoint
-            // But evaluate_single_expr expects an array of variables.
-            // Since vars is column-major [var][dp], we can't just pass a pointer.
-            // We need to gather them or change evaluate_single_expr.
-            // Let's gather for simplicity (stack allocation is cheap)
-            float dp_vars[MAX_NUM_FEATURES];
-            for (int v = 0; v < num_vars; v++) {
-                dp_vars[v] = vars[v][dp];
-            }
-
-            float pred = evaluate_single_expr(tokens, values, num_tokens, dp_vars, num_vars);
-            
-            if (!std::isnan(pred) && !std::isinf(pred)) {
-                float diff = pred - y_true[dp];
-                total_sq_err += diff * diff;
-                valid_dps++;
-            }
-        }
-
-        if (valid_dps > 0) {
-            mses[i] = total_sq_err / valid_dps;
-        } else {
-            mses[i] = NAN;
-        }
+    // Threading setup
+    int n_threads = 1;
+    if (const char* env_p = std::getenv("THREADS")) {
+        n_threads = std::atoi(env_p);
+    } else {
+        n_threads = std::thread::hardware_concurrency();
     }
+    if (n_threads < 1) n_threads = 1;
+
+    std::vector<std::thread> workers;
+
+    for (int t = 0; t < n_threads; t++) {
+        workers.emplace_back([&, t]() {
+            int start_idx = (long)num_exprs * t / n_threads;
+            int end_idx = (long)num_exprs * (t + 1) / n_threads;
+            
+            for (int i = start_idx; i < end_idx; i++) {
+                int len = input_info.num_tokens[i];
+                // Evaluate
+                const int* tokens = input_info.tokens[i];
+                const double* values = input_info.values[i];
+                int num_vars = input_info.num_vars[i];
+                int num_dps = input_info.num_dps[i];
+                float** vars = all_vars[i]; // vars[v][dp]
+                
+                // Optimization: Pre-extract pointers
+                std::vector<float*> var_ptrs(num_vars);
+                for(int v=0; v<num_vars; v++) var_ptrs[v] = vars[v];
+                
+                // Get Y (last var)
+                float* y_true = var_ptrs[num_vars]; // num_vars is features? 
+                // Wait, all_vars has size num_vars+1 (last is Y)
+                
+                double total_sq_err = 0.0;
+                int valid_dps = 0;
+
+                // Temp buffer for single DP vars
+                float dp_vars[MAX_NUM_FEATURES];
+
+                for (int dp = 0; dp < num_dps; dp++) {
+                    for(int v=0; v<num_vars; v++) {
+                        dp_vars[v] = var_ptrs[v][dp];
+                    }
+                    
+                    float pred = evaluate_single_expr(tokens, values, len, dp_vars, num_vars);
+                    
+                    if (!std::isnan(pred) && !std::isinf(pred)) {
+                        float diff = pred - y_true[dp];
+                        total_sq_err += diff * diff;
+                        valid_dps++;
+                    }
+                }
+
+                if (valid_dps > 0) {
+                    mses[i] = total_sq_err / valid_dps;
+                } else {
+                    mses[i] = NAN;
+                }
+            }
+        });
+    }
+    
+    for (auto& w : workers) {
+        if (w.joinable()) w.join();
+    }
+    
+    stats.total_eval_time_ms = clock_to_ms(start, measure_clock());
 }

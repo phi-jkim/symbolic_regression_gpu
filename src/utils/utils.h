@@ -99,6 +99,19 @@ typedef struct {
     EvalMetrics *eval_metrics;
 } AggregatedResults;
 
+// Detailed Runtime Stats for CSV
+struct RunStats {
+    double total_eval_time_ms = 0.0;
+    double drift_detect_time_ms = 0.0; // CPU Detect
+    double data_transfer_time_ms = 0.0; // H2D + D2H
+    double gpu_kernel_time_ms = 0.0;
+    
+    // Detection Stats
+    int num_subtrees = 0;
+    double avg_subtree_size = 0.0;
+    double coverage = 0.0;
+};
+
 // Parse input digest file (handles 1 or more expressions)
 InputInfo parse_input_info(const std::string& input_file);
 
