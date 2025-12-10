@@ -349,21 +349,7 @@ static float *flatten_X_col_major_full(double **vars, int num_vars, int total_dp
 }
 
 // Hash is still computed in double on CPU for consistency with CPU subtree detection
-static uint64_t compute_subtree_hash_gpu(const int *tokens, const double *values, int len) {
-  uint64_t h = 14695981039346656037ULL;
-  const uint64_t prime = 1099511628211ULL;
-  for (int i = 0; i < len; i++) {
-    h ^= (uint64_t)tokens[i];
-    h *= prime;
-    uint64_t v_bits;
-    double v_val = values[i];
-    memcpy(&v_bits, &v_val, sizeof(double));
-    h ^= v_bits;
-    h *= prime;
-  }
-  return h;
-}
-
+≈
 // Local helpers to compute subtree size (prefix notation) on the host
 static int simple_op_arity_state(int token) {
   if (token < 10) return 2;  // binary operators 1-9
@@ -396,13 +382,17 @@ static int compute_subtree_size_state(const int *tokens, int start_idx, int tota
 //   hints[pos] >= 0 : root of cached subtree, value is CACHE SLOT ID
 //   hints[pos] == -2: inside cached subtree
 //   hints[pos] == -1: no cached subtree
-static void mark_cached_subtrees_from_state(
+static int mark_cached_subtrees_from_state(
     InputInfo &input_info,
     GPUSubtreeStateContext &ctx,
-    SubtreeDetectionResult &result) {
+    SubtreeDetectionResult &result,
+    int pre_gen_limit) {
 
   int num_exprs = input_info.num_exprs;
   const int min_size_state = MIN_SUBTREE_SIZE;  // same as detect_common_subtrees default
+  // int reused_count = 0;
+  // Use a vector to track which unique slots < pre_gen_limit have been used
+  std::vector<bool> reused_slots_mask(pre_gen_limit, false);
 
   for (int expr = 0; expr < num_exprs; ++expr) {
     int    len   = input_info.num_tokens[expr];
@@ -434,11 +424,23 @@ static void mark_cached_subtrees_from_state(
 
       // Mark root and body
       hints[pos] = slot;      // cache-slot ID
+      if (slot < pre_gen_limit) {
+        reused_slots_mask[slot] = true;
+        // reused_count++;
+      }
       for (int k = 1; k < size && pos + k < len; ++k) {
         hints[pos + k] = -2;  // inside subtree
       }
     }
   }
+
+  int unique_reused_count = 0;
+  for (int i = 0; i < pre_gen_limit; ++i) {
+    if (reused_slots_mask[i]) {
+      unique_reused_count++;
+    }
+  }
+  return unique_reused_count;
 }
 
 // =============================================================================
@@ -471,6 +473,7 @@ void eval_gpu_subtree_batch_state(
       2);
 
   // Step 2: Map detected subtrees to persistent cache slots
+  int pre_gen_cached_count = ctx.num_cached;
   std::vector<int> new_subtree_indices;
   std::vector<int> new_cache_slots;
   std::vector<int> subtree_id_to_slot(result.num_subs, -1);
@@ -501,7 +504,8 @@ void eval_gpu_subtree_batch_state(
   // Step 2b: Mark any subtree (including those from previous generations)
   // whose hash is present in the persistent GPU cache. This populates
   // expr_sub_hints with cache-slot IDs at subtree roots.
-  mark_cached_subtrees_from_state(input_info, ctx, result);
+  int reused_from_prev = mark_cached_subtrees_from_state(input_info, ctx, result, pre_gen_cached_count);
+  std::cout << "[gpu_subtree_state] Reused from prev gen cache: " << reused_from_prev << std::endl;
 
   // Step 3: Prepare subtree structures for NEW subtrees (tokens/values)
   int *d_sub_tokens = nullptr, *d_sub_offsets = nullptr, *d_sub_lengths = nullptr, *d_sub_slots = nullptr;

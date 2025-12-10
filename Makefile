@@ -11,7 +11,7 @@ NVCC = nvcc
 # - sm_80: Ampere (RTX 30 series, A100)
 # - sm_86: RTX 3090
 # - sm_89: RTX 4090, L40S
-GPU_ARCH ?= sm_75
+GPU_ARCH ?= sm_89
 
 NVFLAGS ?= -O3 \
   -gencode arch=compute_89,code=sm_89 \
@@ -677,10 +677,15 @@ bench_test20_gpu_jinha: $(GPU_JINHA_EVOLVE_BIN)
 	@echo ">> GPU Jinha (Multi-Expr Batch)"
 	./build/gpu_jinha_evolve -evolution 0 19 data/evolution_test20
 
-bench_test20_gpu_custom: $(GPU_CUSTOM_PEREXPR_BIN)
-	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Custom Kernel) ---"
-	@echo ">> GPU Custom Kernel (Per-Expr)"
-	./build/gpu_custom_kernel_perexpression_evolve -evolution 0 19 data/evolution_test20
+bench_test20_gpu_custom: $(GPU_CUSTOM_PEREXPR_MULTI_BIN)
+	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Custom Kernel - Multi-Expr PTX) ---"
+	@echo ">> GPU Custom Kernel (Multi-Expr PTX)"
+	$(GPU_CUSTOM_PEREXPR_MULTI_BIN) -evolution 0 19 data/evolution_test20
+
+bench_test20_gpu_custom_nvrtc: $(GPU_CUSTOM_PEREXPR_MULTI_NVRTC_BIN)
+	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Custom Kernel - Multi-Expr NVRTC) ---"
+	@echo ">> GPU Custom Kernel (Multi-Expr NVRTC)"
+	$(GPU_CUSTOM_PEREXPR_MULTI_NVRTC_BIN) -evolution 0 19 data/evolution_test20
 
 bench_test20_gpu_baseline: $(GPU_BASELINE_BIN)
 	@echo "--- Running Test20 Benchmark (Klein-Nishina, 20 gens, 1M dps) on GPU (Baseline utils multi-expr) ---"

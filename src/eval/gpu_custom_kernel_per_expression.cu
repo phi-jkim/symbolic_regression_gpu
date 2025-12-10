@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <cstring>
+#include <fstream>
 
 #include "../utils/utils.h"
 #include "../utils/gpu_kernel.h"
@@ -20,6 +21,8 @@
 #ifndef MAX_EVAL_STACK
 #define MAX_EVAL_STACK 60
 #endif
+
+static constexpr int MAX_NUM_FEATURES = 16;
 
 #define CUDA_CHECK(call)                                            \
     do {                                                            \
@@ -107,44 +110,44 @@ static const float DELTA   = 1e-9f;
 static const float MAX_VAL = 1e9f;
 
 // Simple device-side NaN helper to avoid relying on NAN from system headers.
-__device__ inline float my_nan() {
+__device__ __forceinline__ float my_nan() {
     return __int_as_float(0x7fffffff);
 }
 
-__device__ inline float clamp_val(float r) { return r; }
+__device__ __forceinline__ float clamp_val(float r) { return r; }
 
-__device__ inline float safe_div(float a, float b) {
+__device__ __forceinline__ float safe_div(float a, float b) {
     const float eps = 1e-12f;
     float denom = fabsf(b) < eps ? (b < 0 ? -eps : eps) : b;
     return a / denom;
 }
 
-__device__ inline float loose_div(float a, float b) {
+__device__ __forceinline__ float loose_div(float a, float b) {
     float denom = fabsf(b) <= DELTA ? (b < 0 ? -DELTA : DELTA) : b;
     return a / denom;
 }
 
-__device__ inline float safe_log(float a) {
+__device__ __forceinline__ float safe_log(float a) {
     const float eps = 1e-12f;
     return logf(fabsf(a) + eps);
 }
 
-__device__ inline float loose_log(float a) {
+__device__ __forceinline__ float loose_log(float a) {
     if (a == 0.0f) return -MAX_VAL;
     return logf(fabsf(a));
 }
 
-__device__ inline float safe_inv(float a) {
+__device__ __forceinline__ float safe_inv(float a) {
     if (a == 0.0f) return my_nan();
     return 1.0f / a;
 }
 
-__device__ inline float loose_inv(float a) {
+__device__ __forceinline__ float loose_inv(float a) {
     float denom = fabsf(a) <= DELTA ? (a < 0 ? -DELTA : DELTA) : a;
     return 1.0f / denom;
 }
 
-__device__ inline float apply_op(int op, float a, float b) {
+__device__ __forceinline__ float apply_op(int op, float a, float b) {
     switch (op) {
         // Binary operators (1-9)
         case OP_ADD:       return clamp_val(a + b);
@@ -361,6 +364,14 @@ static void eval_expr_straightline_gpu(
     NVRTC_CHECK(nvrtcGetPTXSize(prog, &ptxSize));
     std::string ptx(ptxSize, '\0');
     NVRTC_CHECK(nvrtcGetPTX(prog, &ptx[0]));
+
+    {
+        std::ofstream out("build/custom_single_expr_nvrtc.ptx");
+        if (out.is_open()) {
+            out << ptx;
+        }
+    }
+
     NVRTC_CHECK(nvrtcDestroyProgram(&prog));
 
     auto t_nvrtc_end = clock_t::now();
@@ -657,6 +668,163 @@ DONE:
 //  Multi-expression straight-line kernel (NVRTC C++ version)
 // ============================================================================
 
+// static std::string build_multi_expr_kernel_src(
+//     const std::vector<ExprDesc>& exprs,
+//     int                          num_features)
+// {
+//     std::ostringstream oss;
+//     oss.setf(std::ios::scientific);
+
+//     // Device helpers
+//     oss << DEVICE_HELPERS_SRC << "\n";
+
+//     // Kernel header
+//     oss <<
+// R"(extern "C" __global__
+// void eval_multi_expr_kernel(const float* __restrict__ X,
+//                             int   num_features,
+//                             int   num_dps,
+//                             int   num_exprs,
+//                             float* __restrict__ out) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx >= num_dps) return;
+//     const float* x = X + idx * num_features;
+// )";
+
+//     const size_t num_exprs = exprs.size();
+//     std::vector<std::string> expr_blocks(num_exprs);
+
+//     auto worker_fn = [&](size_t start_e, size_t end_e) {
+//         for (size_t e = start_e; e < end_e; ++e) {
+//             const ExprDesc& ed = exprs[e];
+
+//             std::ostringstream expr_oss;
+//             expr_oss.setf(std::ios::scientific);
+
+//             expr_oss << "    // ----- Expression " << e << " -----\n";
+//             expr_oss << "    {\n";
+
+//             struct Temp { int id; };
+//             std::vector<Temp> stack;
+//             int nextTemp = 0;
+
+//             auto alloc_temp = [&]() -> int {
+//                 if (nextTemp >= MAX_EVAL_STACK) {
+//                     throw std::runtime_error("MAX_EVAL_STACK exceeded in build_multi_expr_kernel_src");
+//                 }
+//                 return nextTemp++;
+//             };
+
+//             auto emit_const = [&](float c) {
+//                 int id = alloc_temp();
+//                 expr_oss << "        float t" << id << " = " << c << "f;\n";
+//                 stack.push_back({id});
+//             };
+
+//             auto emit_var = [&](int fidx) {
+//                 int id = alloc_temp();
+//                 expr_oss << "        float t" << id
+//                          << " = ((" << fidx << " >= 0 && " << fidx
+//                          << " < num_features) ? x[" << fidx << "] : 0.0f);\n";
+//                 stack.push_back({id});
+//             };
+
+//             auto emit_unary = [&](int op) {
+//                 if (stack.empty()) return;
+//                 Temp a = stack.back(); stack.pop_back();
+//                 int id = alloc_temp();
+//                 expr_oss << "        float t" << id
+//                          << " = apply_op(" << op << ", t" << a.id << ", 0.0f);\n";
+//                 stack.push_back({id});
+//             };
+
+//             auto emit_binary = [&](int op) {
+//                 if (stack.size() < 2) return;
+//                 Temp a = stack.back(); stack.pop_back();
+//                 Temp b = stack.back(); stack.pop_back();
+//                 int id = alloc_temp();
+//                 expr_oss << "        float t" << id
+//                          << " = apply_op(" << op << ", t" << a.id << ", t" << b.id << ");\n";
+//                 stack.push_back({id});
+//             };
+
+//             auto emit_ternary_if = [&]() {
+//                 if (stack.size() < 3) return;
+//                 Temp c = stack.back(); stack.pop_back();
+//                 Temp b = stack.back(); stack.pop_back();
+//                 Temp a = stack.back(); stack.pop_back();
+//                 int id = alloc_temp();
+//                 expr_oss << "        float t" << id
+//                          << " = (t" << a.id << " > 0.0f) ? t" << b.id
+//                          << " : t" << c.id << ";\n";
+//                 stack.push_back({id});
+//             };
+
+//             for (int i = ed.len - 1; i >= 0; --i) {
+//                 int t = ed.tokens[i];
+//                 if (t == TOK_CONST) {
+//                     emit_const(ed.values[i]);
+//                 } else if (t == TOK_VAR) {
+//                     int fidx = static_cast<int>(ed.values[i]);
+//                     emit_var(fidx);
+//                 } else if (t == Function::IF) {
+//                     emit_ternary_if();
+//                 } else {
+//                     int ar = op_arity(t);
+//                     if (ar == 1) {
+//                         emit_unary(t);
+//                     } else if (ar == 2) {
+//                         emit_binary(t);
+//                     } else {
+//                         emit_ternary_if();
+//                     }
+//                 }
+//             }
+
+//             int result_id = 0;
+//             if (!stack.empty()) {
+//                 result_id = stack.back().id;
+//             } else {
+//                 expr_oss << "        float t0 = 0.0f;\n";
+//                 result_id = 0;
+//             }
+
+//             expr_oss << "        out[" << e
+//                      << " * num_dps + idx] = t" << result_id << ";\n";
+//             expr_oss << "    }\n\n";
+
+//             expr_blocks[e] = expr_oss.str();
+//         }
+//     };
+
+//     unsigned int hc = std::thread::hardware_concurrency();
+//     size_t max_threads = hc ? (size_t)hc : 1;
+//     if (max_threads > num_exprs) max_threads = num_exprs;
+
+//     std::vector<std::thread> workers;
+//     workers.reserve(max_threads);
+
+//     size_t chunk = (num_exprs + max_threads - 1) / max_threads;
+//     for (size_t t = 0; t < max_threads; ++t) {
+//         size_t start_e = t * chunk;
+//         if (start_e >= num_exprs) break;
+//         size_t end_e = start_e + chunk;
+//         if (end_e > num_exprs) end_e = num_exprs;
+//         workers.emplace_back(worker_fn, start_e, end_e);
+//     }
+
+//     for (auto &th : workers) {
+//         th.join();
+//     }
+
+//     for (size_t e = 0; e < num_exprs; ++e) {
+//         oss << expr_blocks[e];
+//     }
+
+//     oss << "}\n";
+//     return oss.str();
+// }
+
 static std::string build_multi_expr_kernel_src(
     const std::vector<ExprDesc>& exprs,
     int                          num_features)
@@ -679,6 +847,14 @@ void eval_multi_expr_kernel(const float* __restrict__ X,
     if (idx >= num_dps) return;
     const float* x = X + idx * num_features;
 )";
+
+    oss << "    float local_reg[" << MAX_NUM_FEATURES << "]" << ";\n";
+    oss << "    int nf = num_features;\n";
+    oss << "    if (nf > " << MAX_NUM_FEATURES << ") nf = " << MAX_NUM_FEATURES << ";\n";
+    for (int f = 0; f < MAX_NUM_FEATURES; ++f) {
+        oss << "    if (" << f << " < nf) local_reg[" << f << "] = x[" << f << "];\n";
+    }
+    oss << "\n";
 
     const size_t num_exprs = exprs.size();
     std::vector<std::string> expr_blocks(num_exprs);
@@ -712,9 +888,12 @@ void eval_multi_expr_kernel(const float* __restrict__ X,
 
             auto emit_var = [&](int fidx) {
                 int id = alloc_temp();
-                expr_oss << "        float t" << id
-                         << " = ((" << fidx << " >= 0 && " << fidx
-                         << " < num_features) ? x[" << fidx << "] : 0.0f);\n";
+                if (fidx >= 0 && fidx < MAX_NUM_FEATURES) {
+                    expr_oss << "        float t" << id
+                             << " = ((" << fidx << " < num_features) ? local_reg[" << fidx << "] : 0.0f);\n";
+                } else {
+                    expr_oss << "        float t" << id << " = 0.0f;\n";
+                }
                 stack.push_back({id});
             };
 
@@ -832,6 +1011,20 @@ static double eval_multi_expr_straightline_gpu(
     // 1. Build PTX source (CPU codegen)
     std::string ptx = build_multi_expr_kernel_ptx(exprs, num_features);
 
+    // Write generated PTX to file
+    {
+        // Only write if file doesn't exist (save first generation only)
+        // or rename to unique file if preferred.
+        // For now, we'll just check if it exists to avoid overwrite if user wants the first one.
+        // Actually, user requested "store the first", so we check existence.
+        std::ifstream fcheck("build/custom_multi_expr.ptx");
+        if (!fcheck.good()) {
+            std::ofstream out("build/custom_multi_expr.ptx");
+            out << ptx;
+            out.close();
+        }
+    }
+
     auto t_build_end = clock_t::now();
     double build_ms = std::chrono::duration<double, std::milli>(
         t_build_end - t_build_start).count();
@@ -906,6 +1099,18 @@ static double eval_multi_expr_straightline_gpu(
     size_t cubin_size  = 0;
     CU_CHECK(cuLinkComplete(linkState, &cubin_data, &cubin_size));
 
+    // Save linked object for analysis (first time only)
+    {
+        std::ifstream fcheck("build/custom_multi_expr_linked.cubin", std::ios::binary);
+        if (!fcheck.good()) {
+            std::ofstream out("build/custom_multi_expr_linked.cubin", std::ios::binary);
+            if (out.is_open()) {
+                out.write(reinterpret_cast<const char*>(cubin_data), static_cast<std::streamsize>(cubin_size));
+                out.close();
+            }
+        }
+    }
+
     CU_CHECK(cuModuleLoadData(&module, cubin_data));
 
     fprintf(stderr, "[PTX JIT] info log:\n%s\n", info_log);
@@ -950,9 +1155,22 @@ static double eval_multi_expr_straightline_gpu(
     double launch_ms = std::chrono::duration<double, std::milli>(
         t_launch_end - t_launch_start).count();
 
+    static double total_launch_ms = 0.0;
+    static long   launch_calls    = 0;
+    total_launch_ms += launch_ms;
+    launch_calls    += 1;
+    double avg_launch_ms = total_launch_ms / (double)launch_calls;
+
     fprintf(stderr,
-            "[multi-expr-ptx] timings: build_ptx=%g ms, PTX->SASS JIT=%g ms (reported %g ms), launch+sync=%g ms (num_exprs=%d, num_dps=%d)\n",
-            build_ms, jit_ms, (double)wall_time_ms, launch_ms, num_exprs_i, num_dps);
+            "[multi-expr-ptx] timings: build_ptx=%g ms, PTX->SASS JIT=%g ms (reported %g ms), launch+sync=%g ms, avg_launch+sync=%g ms over %ld runs (num_exprs=%d, num_dps=%d)\n",
+            build_ms,
+            jit_ms,
+            (double)wall_time_ms,
+            launch_ms,
+            avg_launch_ms,
+            launch_calls,
+            num_exprs_i,
+            num_dps);
 
     if (compile_ms_p) *compile_ms_p = build_ms;
     if (jit_ms_p)     *jit_ms_p     = (double)wall_time_ms;
@@ -1015,7 +1233,20 @@ static double eval_multi_expr_straightline_gpu_nvrtc(
     NVRTC_CHECK(nvrtcGetPTXSize(prog, &ptxSize));
     std::string ptx(ptxSize, '\0');
     NVRTC_CHECK(nvrtcGetPTX(prog, &ptx[0]));
+    // Write generated PTX to file
+    {
+        std::ofstream out("build/custom_multi_expr_nvrtc.ptx");
+        out << ptx;
+        out.close();
+    }
+
     NVRTC_CHECK(nvrtcDestroyProgram(&prog));
+    // Write generated PTX to file
+    {
+        std::ofstream out("build/custom_multi_expr_nvrtc.ptx");
+        out << ptx;
+        out.close();
+    }
 
     auto t_nvrtc_end = clock_t::now();
     double nvrtc_ms = std::chrono::duration<double, std::milli>(
@@ -1072,12 +1303,20 @@ static double eval_multi_expr_straightline_gpu_nvrtc(
     double launch_ms = std::chrono::duration<double, std::milli>(
         t_launch_end - t_launch_start).count();
 
+    static double total_launch_ms = 0.0;
+    static long   launch_calls    = 0;
+    total_launch_ms += launch_ms;
+    launch_calls    += 1;
+    double avg_launch_ms = total_launch_ms / (double)launch_calls;
+
     fprintf(stderr,
-            "[multi-expr-nvrtc] timings: build_src=%g ms, C++->PTX NVRTC=%g ms, PTX->SASS JIT=%g ms, launch+sync=%g ms (num_exprs=%d, num_dps=%d)\n",
+            "[multi-expr-nvrtc] timings: build_src=%g ms, C++->PTX NVRTC=%g ms, PTX->SASS JIT=%g ms, launch+sync=%g ms, avg_launch+sync=%g ms over %ld runs (num_exprs=%d, num_dps=%d)\n",
             build_ms,
             nvrtc_ms,
             jit_ms,
             launch_ms,
+            avg_launch_ms,
+            launch_calls,
             num_exprs_i,
             num_dps);
 
@@ -1488,7 +1727,8 @@ void eval_multi_expr_ptx_batch(InputInfo &input_info,
     all_tokens.reserve((size_t)input_info.max_tokens * (size_t)num_exprs);
     all_values.reserve((size_t)input_info.max_tokens * (size_t)num_exprs);
 
-    for (int expr_id = 0; expr_id < num_exprs; ++expr_id) {
+    int limit_exprs = (num_exprs > 100) ? 100 : num_exprs;
+    for (int expr_id = 0; expr_id < limit_exprs; ++expr_id) {
         const int expr_tokens = input_info.num_tokens[expr_id];
         if (expr_tokens <= 0) continue;
 
@@ -1577,8 +1817,6 @@ void eval_multi_expr_ptx_batch(InputInfo &input_info,
         &compile_ms,
         &jit_ms);
 
-    (void)launch_ms;
-
     std::vector<float> out_host((size_t)num_exprs * (size_t)num_dps);
     TimePoint t_d2h = measure_clock();
     CUDA_CHECK(cudaMemcpy(out_host.data(),
@@ -1587,6 +1825,14 @@ void eval_multi_expr_ptx_batch(InputInfo &input_info,
                             cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaDeviceSynchronize());
     memcpy_d2h_ms_total += clock_to_ms(t_d2h, measure_clock());
+
+    if (metrics) {
+        metrics->h2d_transfer_ms += memcpy_h2d_ms_total;
+        metrics->d2h_transfer_ms += memcpy_d2h_ms_total;
+        metrics->kernel_exec_ms += launch_ms;
+        metrics->total_gpu_ms += memcpy_h2d_ms_total + launch_ms + memcpy_d2h_ms_total;
+        metrics->num_kernel_launches += 1;
+    }
 
     for (int expr_id = 0; expr_id < num_exprs; ++expr_id) {
         for (int dp = 0; dp < num_dps; ++dp) {
@@ -1614,6 +1860,7 @@ void eval_multi_expr_nvrtc_batch(InputInfo &input_info,
     double alloc_ms = 0.0;
     double memcpy_h2d_ms_total = 0.0;
     double memcpy_d2h_ms_total = 0.0;
+    double launch_ms = 0.0;
 
     const int num_exprs = input_info.num_exprs;
     if (num_exprs <= 0) {
@@ -1642,7 +1889,8 @@ void eval_multi_expr_nvrtc_batch(InputInfo &input_info,
     all_tokens.reserve((size_t)input_info.max_tokens * (size_t)num_exprs);
     all_values.reserve((size_t)input_info.max_tokens * (size_t)num_exprs);
 
-    for (int expr_id = 0; expr_id < num_exprs; ++expr_id) {
+    int limit_exprs = (num_exprs > 100) ? 100 : num_exprs;
+    for (int expr_id = 0; expr_id < limit_exprs; ++expr_id) {
         const int expr_tokens = input_info.num_tokens[expr_id];
         if (expr_tokens <= 0) continue;
 
@@ -1721,7 +1969,7 @@ void eval_multi_expr_nvrtc_batch(InputInfo &input_info,
 
     double compile_ms = 0.0;
     double jit_ms     = 0.0;
-    double launch_ms  = eval_multi_expr_straightline_gpu_nvrtc(
+    launch_ms = eval_multi_expr_straightline_gpu_nvrtc(
         exprs,
         d_X,
         num_features,
@@ -1729,8 +1977,6 @@ void eval_multi_expr_nvrtc_batch(InputInfo &input_info,
         d_out,
         &compile_ms,
         &jit_ms);
-
-    (void)launch_ms;
 
     std::vector<float> out_host((size_t)num_exprs * (size_t)num_dps);
     TimePoint t_d2h = measure_clock();
@@ -1740,6 +1986,14 @@ void eval_multi_expr_nvrtc_batch(InputInfo &input_info,
                           cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaDeviceSynchronize());
     memcpy_d2h_ms_total += clock_to_ms(t_d2h, measure_clock());
+
+    if (metrics) {
+        metrics->h2d_transfer_ms += memcpy_h2d_ms_total;
+        metrics->d2h_transfer_ms += memcpy_d2h_ms_total;
+        metrics->kernel_exec_ms += launch_ms;
+        metrics->total_gpu_ms += memcpy_h2d_ms_total + launch_ms + memcpy_d2h_ms_total;
+        metrics->num_kernel_launches += 1;
+    }
 
     for (int expr_id = 0; expr_id < num_exprs; ++expr_id) {
         for (int dp = 0; dp < num_dps; ++dp) {

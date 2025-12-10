@@ -202,7 +202,7 @@ run_sr_task_scale_dps_gpu:
 
 # Data Generation
 gen_data_test20_1M:
-	python3 ../script/generate_evolution_test20.py --out ../../data/evolution_test20_1M --dps 1000000 --gens 200 --pop 2000
+	python3 ../script/generate_evolution_test20.py --out ../../data/evolution_test20_1M --dps 1000000 --gens 1 --pop 2000
 
 clean:
 	rm -f $(OBJS) $(BUILD_DIR)/cl_bench $(BUILD_DIR)/cl_sr_*

@@ -391,27 +391,6 @@ struct RegCache3 {
 };
 
 
-__launch_bounds__(128, 12)
-// 16
-__global__ void eval_prefix_kernel_batch(const int* __restrict__ tokens,
-                                         const float* __restrict__ values,
-                                         const float* __restrict__ X, // [dataPoints, num_features]
-                                         int len,
-                                         int num_features,
-                                         int dataPoints,
-                                         float* s_val_old,
-                                         float* __restrict__ out) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= dataPoints) return;
-    
-    float stack[MAX_EVAL_STACK];   // backing stack (likely local memory)
-    int   sp = 0;
-    int   tc = 0;
-
-    // RegCache6 cache;
-    // RegCache3 cache;
-
-    const float* x = X + (size_t)idx * (size_t)num_features;
     // float r;
 
     // for (int i = len - 1; i >= 0; --i) {
@@ -448,6 +427,20 @@ __global__ void eval_prefix_kernel_batch(const int* __restrict__ tokens,
     // // float result = 0.0f;
     // out[idx] = (tc == 1 && sp == 0) ? cache.pop(stack, sp, tc) : 0.0f;
 
+__launch_bounds__(128, 12)
+
+__global__ void eval_prefix_kernel_batch(const int* __restrict__ tokens,
+                                         const float* __restrict__ values,
+                                         const float* __restrict__ X, // [dataPoints, num_features]
+                                         int len,
+                                         int num_features,
+                                         int dataPoints,
+                                         float* s_val_old,
+                                         float* __restrict__ out) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= dataPoints) return;
+    float stack[MAX_EVAL_STACK];   // backing stack (likely local memory)
+    int   sp = 0; int tc = 0; const float* x = X + (size_t)idx * (size_t)num_features;
     for (int i = len - 1; i >= 0; --i) {
         const int t = tokens[i];
         if (t == TOK_CONST) {
@@ -482,6 +475,16 @@ __global__ void eval_prefix_kernel_batch(const int* __restrict__ tokens,
         }
     }
     out[idx] = (sp > 0) ? stack[sp - 1] : 0.0f;
+}
+extern "C" void eval_tree_gpu_batch(const int* tokens,const float* values, const float* X,
+                                    int len,
+                                    int num_features,
+                                    int dataPoints,
+                                    float* out_dev,
+                                    int blocks,
+                                    int threads,
+                                    float* s_val) {
+    eval_prefix_kernel_batch<<<blocks, threads>>>(tokens, values, X, len, num_features, dataPoints, s_val, out_dev);
 }
 
 // ---- Batched (datapoint-parallel) evaluator ----
@@ -602,24 +605,6 @@ struct RegStack60 {
 //     float r = (st.sp > 0) ? st.pop() : 0.0f;
 //     out[idx] = r;
 // }
-
-extern "C" void eval_tree_gpu_batch(const int* tokens,
-                                    const float* values,
-                                    const float* X,
-                                    int len,
-                                    int num_features,
-                                    int dataPoints,
-                                    float* out_dev,
-                                    int blocks,
-                                    int threads,
-                                    float* s_val) {
-    // if (threads <= 0) threads = 256;
-    // if (blocks  <= 0) blocks  = (dataPoints + threads - 1) / threads;
-    // datapoints 
-    // int shmem = 16000; 
-    eval_prefix_kernel_batch<<<blocks, threads>>>(tokens, values, X, len, num_features, dataPoints, s_val, out_dev);
-    // eval_prefix_kernel_batch<<<blocks, threads>>>(tokens, values, X, len, num_features, dataPoints, out_dev);
-}
 
 // staged tokens/values and per-thread stacks.
 // ---- Batched (datapoint-parallel) evaluator with shared tokens/values ----
@@ -1279,61 +1264,6 @@ extern "C" void eval_tree_gpu_async(
 //     return (sp > 0) ? static_stack_pop(stk, sp) : 0.0f;
 // }
 
-__device__ inline float eval_tree_device(const int* tokens,
-                                         const float* values,
-                                         const float* d_vars_flat,
-                                         int len,
-                                         int num_features,
-                                         int num_dps,
-                                         int dp_idx) {
-    float stk[MAX_EVAL_STACK];
-    int sp = 0;
-    int output = 0; 
-    int tok; 
-
-    
-    for (int i = len - 1; i >= 0; i--) {
-        tok = tokens[i];
-        if (tok > 0) { // operator
-            int arity = op_arity(tok);
-            if (arity == 2) {
-                float a = stk[--sp];
-                // --sp; 
-                // float a = 0.0; 
-                float b = stk[--sp];
-                // --sp; 
-                // float b = 0.0; 
-                stk[sp++] = apply_op(tok, a, b);
-                // stk[sp++] = (a, b);
-                // sp++; 
-                // stk[sp++] = 0; 
-            } else { // unary
-                float a = stk[--sp];
-                // --sp; 
-                // float a = 0.0; 
-                stk[sp++] = apply_op(tok, a, 0.0f);
-                // sp++; 
-                // stk[sp++] = 0;
-                // sp++; 
-            }
-        } else if (tok == 0) { // constant
-            stk[sp++] = values[i];
-            // tok = values[i];
-            // sp++;
-        } else if (tok == -1) { // variable
-            int var_idx = (int)values[i];
-            if (var_idx >= 0 && var_idx <= num_features) {
-                stk[sp++] = d_vars_flat[var_idx * num_dps + dp_idx];
-            } else {
-                stk[sp++] = 0.0f;
-            }
-        }
-    }
-    return stk[--sp];
-    // return 0.0f; 
-    // return sp + tok; 
-}
-
 // __device__ inline float eval_tree_device(const int* tokens, const float* values, const float* x, int len, int num_features) {
 //     float stk[MAX_EVAL_STACK];
 //     int sp = 0;
@@ -1391,6 +1321,41 @@ __device__ inline float eval_tree_device(const int* tokens,
 //     return  sp + tmp + stk[--sp]; 
 // }
 
+__device__ inline float eval_tree_device(const int* tokens, const float* values, const float* d_vars_flat,
+                                         int len,
+                                         int num_features,
+                                         int num_dps,
+                                         int dp_idx) {
+    float stk[MAX_EVAL_STACK];
+    int sp = 0;
+    int output = 0; 
+    int tok; 
+    for (int i = len - 1; i >= 0; i--) {
+        tok = tokens[i];
+        if (tok > 0) { // operator
+            int arity = op_arity(tok);
+            if (arity == 2) {
+                float a = stk[--sp];
+                float b = stk[--sp];
+                stk[sp++] = apply_op(tok, a, b);
+            } else { // unary
+                float a = stk[--sp];
+                stk[sp++] = apply_op(tok, a, 0.0f);
+            }
+        } else if (tok == 0) { // constant
+            stk[sp++] = values[i];
+        } else if (tok == -1) { // variable
+            int var_idx = (int)values[i];
+            if (var_idx >= 0 && var_idx <= num_features) {
+                stk[sp++] = d_vars_flat[var_idx * num_dps + dp_idx];
+            } else {
+                stk[sp++] = 0.0f;
+            }
+        }
+    }
+    return stk[--sp];
+}
+
 // GPU kernel: Each threadblock handles multiple expressions and subset of datapoints
 __global__ void eval_prefix_kernel_multi_expression_batch(
     int *d_tokens_batch, float *d_values_batch, int *d_token_offsets, int *d_num_tokens,
@@ -1402,15 +1367,7 @@ __global__ void eval_prefix_kernel_multi_expression_batch(
     int dp_idx = dp_start + threadIdx.x; // which datapoint within this threadblock
     
     if (dp_idx >= num_dps) return;
-    
-    // Prepare input variables for this datapoint (shared by all expressions in this block)
-    // float x[MAX_NUM_FEATURES];
-    // #pragma unroll
-    // for (int i = 0; i <= num_vars; i++) {
-    //     // vars_flat is laid out as [var0_dp0, var0_dp1, ..., var1_dp0, var1_dp1, ...]
-    //     x[i] = d_vars_flat[i * num_dps + dp_idx];
-    // }
-    
+
     // Process all expressions assigned to this threadblock
     for (int expr_idx = block_expr_start; expr_idx < block_expr_end; expr_idx++) {
         // Get tokens and values for this expression
