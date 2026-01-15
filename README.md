@@ -1,4 +1,16 @@
-## 1) MIT Engaging setup for SR evolution benchmarks
+Wwe present the following contributions to the field of accelerated symbolic regression:
+(1) Semantic-Aware Subtree Caching: We introduce a mechanism to detect and reuse common sub-
+expressions across the population, reducing redundant floating-point operations. (notable speedup compared to state of art)
+(2) JIT Compilation Analysis: We provide a comparative analysis of runtime compilation (PTX to SASS,
+or C++ to SASS) versus manual stack-based evaluation, illustrating the trade-offs between compilation
+latency and execution throughput.
+(3) Comprehensive Benchmarking: We validate our system on the AI Feynman benchmark dataset,
+demonstrating performance gains over both CPU and GPU baseline implementations.
+
+<img width="591" height="282" alt="Screenshot 2026-01-16 at 1 17 20 AM" src="https://github.com/user-attachments/assets/38cbbedc-a25c-4f87-ab60-1e2fc72854ed" />
+<img width="581" height="151" alt="Screenshot 2026-01-16 at 1 17 53 AM" src="https://github.com/user-attachments/assets/5f400912-c001-4b1c-b9fb-f693b0448221" />
+
+## 1) MIT Engaging setup for SR evolution benchmarks 
 
 This repo also contains a full symbolic-regression evolution benchmark (GPU + CPU) under `src/cleaned` and `src/eval`. On MIT Engaging you typically want:
 
