@@ -7,7 +7,7 @@ latency and execution throughput.
 (3) Comprehensive Benchmarking: We validate our system on the AI Feynman benchmark dataset,
 demonstrating performance gains over both CPU and GPU baseline implementations.
 
-The results are as shown below where our methodologies of GPU with subtree caching and just in time compilation from PTX have notable speedup compared to baseline. 
+The results are as shown below where our methodologies of GPU with subtree caching and just in time compilation from PTX have notable speedup compared to state of art baseline. 
 
 <img width="591" height="282" alt="Screenshot 2026-01-16 at 1 17 20 AM" src="https://github.com/user-attachments/assets/38cbbedc-a25c-4f87-ab60-1e2fc72854ed" />
 <img width="581" height="151" alt="Screenshot 2026-01-16 at 1 17 53 AM" src="https://github.com/user-attachments/assets/5f400912-c001-4b1c-b9fb-f693b0448221" />
